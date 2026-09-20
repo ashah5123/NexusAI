@@ -1,17 +1,27 @@
 """NexusAI API for local document ingestion and retrieval."""
 
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Body, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from .embedding import EmbeddingService
 from .ingestion import IngestionError, MAX_UPLOAD_BYTES, extract_pdf
-from .models import DocumentCreate, DocumentList, DocumentRead, HealthResponse, SearchResponse
+from .models import (
+    DocumentCreate,
+    DocumentList,
+    DocumentRead,
+    EmbeddingStatus,
+    HealthResponse,
+    ReindexResult,
+    SearchResponse,
+)
 from .repository import DocumentRepository
 
 repository = DocumentRepository()
+embedding_service = EmbeddingService()
 
 
 @asynccontextmanager
@@ -20,7 +30,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="NexusAI API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.4.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -95,5 +105,22 @@ def delete_document(document_id: str) -> Response:
 def search_documents(
     q: Annotated[str, Query(min_length=1, max_length=300)],
     limit: Annotated[int, Query(ge=1, le=50)] = 12,
+    mode: Annotated[Literal["keyword", "semantic", "hybrid"], Query()] = "hybrid",
 ) -> SearchResponse:
-    return repository.search(q.strip(), limit)
+    return repository.search(q.strip(), limit, mode, embedding_service)
+
+
+@app.get("/api/embeddings/status", response_model=EmbeddingStatus)
+def embedding_status() -> EmbeddingStatus:
+    return repository.embedding_status(embedding_service.model_name, embedding_service.loaded)
+
+
+@app.post("/api/embeddings/reindex", response_model=ReindexResult)
+def reindex_embeddings() -> ReindexResult:
+    try:
+        return embedding_service.index_pending(repository)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The embedding model could not be downloaded or loaded. Keyword search remains available.",
+        ) from exc

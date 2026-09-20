@@ -37,6 +37,7 @@ export default function App() {
   const [apiStatus, setApiStatus] = useState("checking");
   const [documents, setDocuments] = useState([]);
   const [query, setQuery] = useState("");
+  const [searchMode, setSearchMode] = useState("hybrid");
   const [searchMeta, setSearchMeta] = useState(null);
   const [results, setResults] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -49,10 +50,17 @@ export default function App() {
   const [voiceName, setVoiceName] = useState("");
   const [rate, setRate] = useState(1);
   const [speaking, setSpeaking] = useState(false);
+  const [embeddingStatus, setEmbeddingStatus] = useState(null);
+  const [indexing, setIndexing] = useState(false);
 
   const loadDocuments = useCallback(async () => {
     const data = await api("/api/documents");
     setDocuments(data.items);
+  }, []);
+
+  const loadEmbeddingStatus = useCallback(async () => {
+    const data = await api("/api/embeddings/status");
+    setEmbeddingStatus(data);
   }, []);
 
   useEffect(() => {
@@ -60,7 +68,8 @@ export default function App() {
       .then((data) => setApiStatus(data.database === "connected" ? "online" : "degraded"))
       .catch(() => setApiStatus("offline"));
     loadDocuments().catch((err) => setError(err.message));
-  }, [loadDocuments]);
+    loadEmbeddingStatus().catch((err) => setError(err.message));
+  }, [loadDocuments, loadEmbeddingStatus]);
 
   useEffect(() => {
     if (!("speechSynthesis" in window)) return undefined;
@@ -91,9 +100,9 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      const data = await api(`/api/search?q=${encodeURIComponent(normalized)}`);
+      const data = await api(`/api/search?q=${encodeURIComponent(normalized)}&mode=${searchMode}`);
       setResults(data.items);
-      setSearchMeta({ total: data.total, elapsed: data.elapsed_ms });
+      setSearchMeta({ total: data.total, elapsed: data.elapsed_ms, mode: data.mode, warning: data.warning });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -145,6 +154,7 @@ export default function App() {
       setSearchMeta(null);
       setResults([]);
       await loadDocuments();
+      await loadEmbeddingStatus();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -159,6 +169,7 @@ export default function App() {
       if (selected?.id === document.id) setSelected(null);
       setResults((current) => current.filter((item) => item.id !== document.id));
       await loadDocuments();
+      await loadEmbeddingStatus();
     } catch (err) {
       setError(err.message);
     }
@@ -182,6 +193,24 @@ export default function App() {
   function stopSpeaking() {
     window.speechSynthesis?.cancel();
     setSpeaking(false);
+  }
+
+  async function enableSemanticSearch() {
+    setIndexing(true);
+    setError("");
+    try {
+      const result = await api("/api/embeddings/reindex", { method: "POST" });
+      setEmbeddingStatus(result);
+      if (query.trim()) {
+        const data = await api(`/api/search?q=${encodeURIComponent(query.trim())}&mode=${searchMode}`);
+        setResults(data.items);
+        setSearchMeta({ total: data.total, elapsed: data.elapsed_ms, mode: data.mode, warning: data.warning });
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIndexing(false);
+    }
   }
 
   return (
@@ -237,6 +266,34 @@ export default function App() {
               {query && <button type="button" className="clear-button" onClick={() => { setQuery(""); setSearchMeta(null); }}>Clear</button>}
               <button className="search-button" disabled={busy}>{busy ? "Searching" : "Search"}</button>
             </div>
+            <div className="search-options">
+              <div className="mode-switch" aria-label="Search mode">
+                {["hybrid", "keyword", "semantic"].map((mode) => (
+                  <button
+                    type="button"
+                    key={mode}
+                    className={searchMode === mode ? "active" : ""}
+                    onClick={() => setSearchMode(mode)}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+              <div className="embedding-state">
+                <span>
+                  {embeddingStatus?.ready
+                    ? `${embeddingStatus.indexed_chunks} passages indexed`
+                    : embeddingStatus?.total_chunks
+                      ? `${embeddingStatus.pending_chunks} passages need vectors`
+                      : "Add documents to enable semantic search"}
+                </span>
+                {!!embeddingStatus?.total_chunks && !embeddingStatus.ready && (
+                  <button type="button" onClick={enableSemanticSearch} disabled={indexing}>
+                    {indexing ? "Indexing locally..." : "Enable semantic search"}
+                  </button>
+                )}
+              </div>
+            </div>
           </form>
 
           {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")}>Dismiss</button></div>}
@@ -282,6 +339,7 @@ export default function App() {
               </div>
 
               <div className="results-list">
+                {searchMeta?.warning && <div className="search-warning">{searchMeta.warning}</div>}
                 {visibleDocuments.map((document) => (
                   <article className="result-row" key={document.id}>
                     <button className="result-main" onClick={() => setSelected(document)}>

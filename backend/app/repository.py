@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import re
 import sqlite3
@@ -7,12 +9,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from .models import DocumentCreate, DocumentList, DocumentRead, SearchHit, SearchResponse
+import numpy as np
+
+from .models import DocumentCreate, DocumentList, DocumentRead, EmbeddingStatus, SearchHit, SearchResponse
 
 DB_PATH = Path(os.getenv("NEXUSAI_DB_PATH", "./data/nexusai.db"))
 TOKEN_RE = re.compile(r"[\w'-]+", re.UNICODE)
 CHUNK_WORDS = 180
 CHUNK_OVERLAP = 30
+SEMANTIC_MIN_SCORE = float(os.getenv("NEXUSAI_SEMANTIC_MIN_SCORE", "0.55"))
 
 
 def split_chunks(text: str) -> list[str]:
@@ -68,6 +73,8 @@ class DocumentRepository:
                     page_number INTEGER,
                     title TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    embedding BLOB,
+                    embedding_model TEXT,
                     UNIQUE(document_id, chunk_index)
                 );
 
@@ -99,6 +106,11 @@ class DocumentRepository:
                 connection.execute(
                     "ALTER TABLE documents ADD COLUMN page_count INTEGER NOT NULL DEFAULT 1"
                 )
+            chunk_columns = {row[1] for row in connection.execute("PRAGMA table_info(chunks)")}
+            if "embedding" not in chunk_columns:
+                connection.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
+            if "embedding_model" not in chunk_columns:
+                connection.execute("ALTER TABLE chunks ADD COLUMN embedding_model TEXT")
             self._backfill_chunks(connection)
             connection.commit()
 
@@ -198,17 +210,48 @@ class DocumentRepository:
             connection.commit()
         return cursor.rowcount > 0
 
-    def search(self, query: str, limit: int) -> SearchResponse:
-        started = time.perf_counter()
-        terms = TOKEN_RE.findall(query)
-        fts_query = " OR ".join(f'"{term}"' for term in terms)
-        if not fts_query:
-            return SearchResponse(query=query, items=[], total=0, elapsed_ms=0)
+    def embedding_status(self, model: str, runtime_loaded: bool) -> EmbeddingStatus:
+        with closing(self.connect()) as connection:
+            total = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            indexed = connection.execute(
+                "SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL AND embedding_model = ?",
+                (model,),
+            ).fetchone()[0]
+        return EmbeddingStatus(
+            model=model,
+            total_chunks=total,
+            indexed_chunks=indexed,
+            pending_chunks=total - indexed,
+            ready=total > 0 and indexed == total,
+            loaded=runtime_loaded,
+        )
 
+    def chunks_pending_embedding(self, model: str) -> list[sqlite3.Row]:
+        with closing(self.connect()) as connection:
+            return connection.execute(
+                """SELECT id, content FROM chunks
+                WHERE embedding IS NULL OR embedding_model != ?
+                ORDER BY id""",
+                (model,),
+            ).fetchall()
+
+    def save_embeddings(
+        self,
+        embeddings: list[tuple[int, np.ndarray]],
+        model: str,
+    ) -> None:
+        with closing(self.connect()) as connection:
+            connection.executemany(
+                "UPDATE chunks SET embedding = ?, embedding_model = ? WHERE id = ?",
+                [(vector.astype(np.float32).tobytes(), model, chunk_id) for chunk_id, vector in embeddings],
+            )
+            connection.commit()
+
+    def _keyword_candidates(self, fts_query: str, limit: int) -> list[dict]:
         with closing(self.connect()) as connection:
             rows = connection.execute(
                 """
-                SELECT d.*, c.chunk_index, c.page_number,
+                SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
                     -bm25(chunks_fts, 7.0, 1.0) AS score,
                     snippet(chunks_fts, 1, '<mark>', '</mark>', ' ... ', 34) AS snippet
                 FROM chunks_fts
@@ -220,6 +263,88 @@ class DocumentRepository:
                 """,
                 (fts_query, limit),
             ).fetchall()
-        items = [SearchHit(**dict(row)) for row in rows]
+        return [dict(row) for row in rows]
+
+    def _semantic_candidates(
+        self,
+        query_vector: np.ndarray,
+        model: str,
+        limit: int,
+    ) -> list[dict]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
+                    c.content AS passage, c.embedding
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.embedding IS NOT NULL AND c.embedding_model = ?""",
+                (model,),
+            ).fetchall()
+
+        query_norm = float(np.linalg.norm(query_vector)) or 1.0
+        candidates: list[dict] = []
+        for row in rows:
+            vector = np.frombuffer(row["embedding"], dtype=np.float32)
+            vector_norm = float(np.linalg.norm(vector)) or 1.0
+            item = dict(row)
+            item.pop("embedding", None)
+            item["score"] = float(np.dot(query_vector, vector) / (query_norm * vector_norm))
+            passage = item.pop("passage")
+            item["snippet"] = passage[:320] + (" ..." if len(passage) > 320 else "")
+            if item["score"] >= SEMANTIC_MIN_SCORE:
+                candidates.append(item)
+        candidates.sort(key=lambda item: item["score"], reverse=True)
+        return candidates[:limit]
+
+    @staticmethod
+    def _fuse(keyword: list[dict], semantic: list[dict], limit: int) -> list[dict]:
+        fused: dict[int, dict] = {}
+        scores: dict[int, float] = {}
+        for results in (keyword, semantic):
+            for rank, item in enumerate(results, 1):
+                passage_id = item["passage_id"]
+                scores[passage_id] = scores.get(passage_id, 0.0) + 1.0 / (60 + rank)
+                if passage_id not in fused or "<mark>" in item["snippet"]:
+                    fused[passage_id] = item
+        ordered = sorted(fused, key=lambda passage_id: scores[passage_id], reverse=True)[:limit]
+        return [{**fused[passage_id], "score": scores[passage_id]} for passage_id in ordered]
+
+    def search(self, query: str, limit: int, mode: str, embedder) -> SearchResponse:
+        started = time.perf_counter()
+        terms = TOKEN_RE.findall(query)
+        fts_query = " OR ".join(f'"{term}"' for term in terms)
+        if not fts_query:
+            return SearchResponse(query=query, items=[], total=0, elapsed_ms=0, mode=mode)
+
+        candidate_limit = max(limit * 3, 30)
+        keyword = self._keyword_candidates(fts_query, candidate_limit) if mode != "semantic" else []
+        semantic: list[dict] = []
+        warning = None
+        if mode != "keyword":
+            status = self.embedding_status(embedder.model_name, embedder.loaded)
+            if status.indexed_chunks:
+                try:
+                    semantic = self._semantic_candidates(
+                        embedder.embed_query(query), embedder.model_name, candidate_limit
+                    )
+                except Exception:
+                    warning = "Semantic model is unavailable; showing keyword results."
+            else:
+                warning = "Enable semantic search to index your document passages."
+
+        if mode == "keyword":
+            rows = keyword[:limit]
+        elif mode == "semantic":
+            rows = semantic[:limit]
+        else:
+            rows = self._fuse(keyword, semantic, limit) if semantic else keyword[:limit]
+        items = [SearchHit(**row) for row in rows]
         elapsed = round((time.perf_counter() - started) * 1000, 2)
-        return SearchResponse(query=query, items=items, total=len(items), elapsed_ms=elapsed)
+        return SearchResponse(
+            query=query,
+            items=items,
+            total=len(items),
+            elapsed_ms=elapsed,
+            mode=mode,
+            warning=warning,
+        )

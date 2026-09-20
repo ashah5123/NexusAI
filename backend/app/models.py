@@ -55,3 +55,19 @@ class SearchResponse(BaseModel):
     items: list[SearchHit]
     total: int
     elapsed_ms: float
+    mode: Literal["keyword", "semantic", "hybrid"] = "keyword"
+    warning: str | None = None
+
+
+class EmbeddingStatus(BaseModel):
+    model: str
+    total_chunks: int
+    indexed_chunks: int
+    pending_chunks: int
+    ready: bool
+    loaded: bool
+
+
+class ReindexResult(EmbeddingStatus):
+    indexed_now: int
+    elapsed_ms: float

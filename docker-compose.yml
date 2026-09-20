@@ -29,6 +29,9 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       NEXUSAI_DB_PATH: /app/data/nexusai.db
+      NEXUSAI_MODEL_CACHE: /app/data/models
+      NEXUSAI_EMBEDDING_MODEL: ${NEXUSAI_EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+      NEXUSAI_SEMANTIC_MIN_SCORE: ${NEXUSAI_SEMANTIC_MIN_SCORE:-0.55}
     volumes:
       - nexusai-data:/app/data
 
