@@ -12,6 +12,7 @@ from app.models import DocumentCreate
 from app.ingestion import IngestionError, extract_image, extract_pdf
 from app.ocr import OCRService
 from app.repository import CHUNK_OVERLAP, CHUNK_WORDS, DocumentRepository, split_chunks
+from app.transcription import TranscriptionError, TranscriptionService, group_segments
 
 
 class FakeEmbedder:
@@ -137,6 +138,51 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertEqual(results.items[0].title, "Operations")
         self.assertEqual(results.mode, "semantic")
         self.assertIsNone(results.warning)
+
+    def test_transcript_passages_preserve_timestamps_in_search(self) -> None:
+        payload = DocumentCreate(
+            title="Team meeting",
+            content="The launch date is October. The budget review follows.",
+            source_type="audio",
+            source_name="meeting.m4a",
+        )
+        document = self.repository.create(
+            payload,
+            timed_passages=[
+                (12.5, 18.0, "The launch date is October."),
+                (18.0, 24.25, "The budget review follows."),
+            ],
+            duration_seconds=24.25,
+            language="en",
+        )
+
+        results = self.repository.search("budget", 10, "keyword", FakeEmbedder())
+
+        self.assertEqual(document.duration_seconds, 24.25)
+        self.assertEqual(document.language, "en")
+        self.assertEqual(results.items[0].start_seconds, 18.0)
+        self.assertEqual(results.items[0].end_seconds, 24.25)
+
+    def test_groups_whisper_segments_into_bounded_passages(self) -> None:
+        segments = [
+            SimpleNamespace(start=0.0, end=4.0, text="one two three"),
+            SimpleNamespace(start=4.0, end=8.5, text="four five"),
+        ]
+
+        passages = group_segments(segments)
+
+        self.assertEqual(len(passages), 1)
+        self.assertEqual(passages[0].start, 0.0)
+        self.assertEqual(passages[0].end, 8.5)
+        self.assertEqual(passages[0].text, "one two three four five")
+
+    def test_rejects_undecodable_media_before_model_load(self) -> None:
+        service = TranscriptionService()
+
+        with self.assertRaisesRegex(TranscriptionError, "could not be decoded"):
+            service.transcribe(b"not media", ".mp3")
+
+        self.assertFalse(service.loaded)
 
 
 if __name__ == "__main__":

@@ -63,6 +63,8 @@ class DocumentRepository:
                     word_count INTEGER NOT NULL,
                     page_count INTEGER NOT NULL DEFAULT 1,
                     ocr_applied INTEGER NOT NULL DEFAULT 0,
+                    duration_seconds REAL,
+                    language TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -72,6 +74,8 @@ class DocumentRepository:
                     document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
                     chunk_index INTEGER NOT NULL,
                     page_number INTEGER,
+                    start_seconds REAL,
+                    end_seconds REAL,
                     title TEXT NOT NULL,
                     content TEXT NOT NULL,
                     embedding BLOB,
@@ -111,11 +115,19 @@ class DocumentRepository:
                 connection.execute(
                     "ALTER TABLE documents ADD COLUMN ocr_applied INTEGER NOT NULL DEFAULT 0"
                 )
+            if "duration_seconds" not in columns:
+                connection.execute("ALTER TABLE documents ADD COLUMN duration_seconds REAL")
+            if "language" not in columns:
+                connection.execute("ALTER TABLE documents ADD COLUMN language TEXT")
             chunk_columns = {row[1] for row in connection.execute("PRAGMA table_info(chunks)")}
             if "embedding" not in chunk_columns:
                 connection.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
             if "embedding_model" not in chunk_columns:
                 connection.execute("ALTER TABLE chunks ADD COLUMN embedding_model TEXT")
+            if "start_seconds" not in chunk_columns:
+                connection.execute("ALTER TABLE chunks ADD COLUMN start_seconds REAL")
+            if "end_seconds" not in chunk_columns:
+                connection.execute("ALTER TABLE chunks ADD COLUMN end_seconds REAL")
             self._backfill_chunks(connection)
             connection.commit()
 
@@ -126,23 +138,36 @@ class DocumentRepository:
             WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.document_id = d.id)"""
         ).fetchall()
         for row in rows:
-            self._insert_chunks(connection, row["id"], row["title"], [(None, row["content"])])
+            self._insert_chunks(
+                connection,
+                row["id"],
+                row["title"],
+                [(None, None, None, row["content"])],
+            )
 
     @staticmethod
     def _insert_chunks(
         connection: sqlite3.Connection,
         document_id: str,
         title: str,
-        sections: list[tuple[int | None, str]],
+        sections: list[tuple[int | None, float | None, float | None, str]],
     ) -> None:
         chunk_index = 0
-        for page_number, text in sections:
+        for page_number, start_seconds, end_seconds, text in sections:
             for content in split_chunks(text):
                 connection.execute(
                     """INSERT INTO chunks
-                    (document_id, chunk_index, page_number, title, content)
-                    VALUES (?, ?, ?, ?, ?)""",
-                    (document_id, chunk_index, page_number, title, content),
+                    (document_id, chunk_index, page_number, start_seconds, end_seconds, title, content)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        document_id,
+                        chunk_index,
+                        page_number,
+                        start_seconds,
+                        end_seconds,
+                        title,
+                        content,
+                    ),
                 )
                 chunk_index += 1
 
@@ -165,17 +190,25 @@ class DocumentRepository:
         pages: list[tuple[int, str]] | None = None,
         ocr_applied: bool = False,
         page_count: int | None = None,
+        timed_passages: list[tuple[float, float, str]] | None = None,
+        duration_seconds: float | None = None,
+        language: str | None = None,
     ) -> DocumentRead:
         now = datetime.now(UTC).isoformat()
         document_id = str(uuid4())
         resolved_page_count = page_count or (len(pages) if pages else 1)
-        sections: list[tuple[int | None, str]] = pages or [(None, payload.content)]
+        if timed_passages:
+            sections = [(None, start, end, text) for start, end, text in timed_passages]
+        elif pages:
+            sections = [(page, None, None, text) for page, text in pages]
+        else:
+            sections = [(None, None, None, payload.content)]
         with closing(self.connect()) as connection:
             connection.execute(
                 """INSERT INTO documents
                 (id, title, content, source_type, source_name, word_count, page_count, ocr_applied,
-                 created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 duration_seconds, language, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     document_id,
                     payload.title,
@@ -185,6 +218,8 @@ class DocumentRepository:
                     len(TOKEN_RE.findall(payload.content)),
                     resolved_page_count,
                     ocr_applied,
+                    duration_seconds,
+                    language,
                     now,
                     now,
                 ),
@@ -260,6 +295,7 @@ class DocumentRepository:
             rows = connection.execute(
                 """
                 SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
+                    c.start_seconds, c.end_seconds,
                     -bm25(chunks_fts, 7.0, 1.0) AS score,
                     snippet(chunks_fts, 1, '<mark>', '</mark>', ' ... ', 34) AS snippet
                 FROM chunks_fts
@@ -282,6 +318,7 @@ class DocumentRepository:
         with closing(self.connect()) as connection:
             rows = connection.execute(
                 """SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
+                    c.start_seconds, c.end_seconds,
                     c.content AS passage, c.embedding
                 FROM chunks c
                 JOIN documents d ON d.id = c.document_id

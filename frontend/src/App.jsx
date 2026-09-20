@@ -33,6 +33,16 @@ function formatDate(value) {
   );
 }
 
+function formatTimestamp(value) {
+  const seconds = Math.max(0, Math.floor(value || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
 export default function App() {
   const [apiStatus, setApiStatus] = useState("checking");
   const [documents, setDocuments] = useState([]);
@@ -132,6 +142,24 @@ export default function App() {
       });
       return;
     }
+    if (file.type.startsWith("audio/") || /\.(mp3|wav|m4a|flac|ogg|aac|opus|aiff?)$/i.test(file.name)) {
+      setForm({
+        title: file.name.replace(/\.(mp3|wav|m4a|flac|ogg|aac|opus|aiff?)$/i, ""),
+        content: "",
+        source_type: "audio",
+        source_name: file.name,
+      });
+      return;
+    }
+    if (file.type.startsWith("video/") || /\.(mp4|mov|mkv|webm|m4v)$/i.test(file.name)) {
+      setForm({
+        title: file.name.replace(/\.(mp4|mov|mkv|webm|m4v)$/i, ""),
+        content: "",
+        source_type: "video",
+        source_name: file.name,
+      });
+      return;
+    }
     const content = await file.text();
     setForm({
       title: file.name.replace(/\.(txt|md|markdown)$/i, ""),
@@ -146,9 +174,11 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      const created = ["pdf", "image"].includes(form.source_type) && uploadFile
+      const binarySource = ["pdf", "image", "audio", "video"].includes(form.source_type);
+      const uploadEndpoint = ["audio", "video"].includes(form.source_type) ? "media" : form.source_type;
+      const created = binarySource && uploadFile
         ? await api(
-            `/api/documents/${form.source_type}?filename=${encodeURIComponent(uploadFile.name)}&title=${encodeURIComponent(form.title)}`,
+            `/api/documents/${uploadEndpoint}?filename=${encodeURIComponent(uploadFile.name)}&title=${encodeURIComponent(form.title)}`,
             {
               method: "POST",
               headers: { "Content-Type": form.source_type === "pdf" ? "application/pdf" : (uploadFile.type || "application/octet-stream") },
@@ -254,7 +284,7 @@ export default function App() {
                 onClick={() => setSelected(document)}
               >
                 <span className="file-type">
-                  {document.source_type === "markdown" ? "MD" : document.source_type === "pdf" ? "PDF" : document.source_type === "image" ? "IMG" : "TXT"}
+                  {document.source_type === "markdown" ? "MD" : document.source_type === "pdf" ? "PDF" : document.source_type === "image" ? "IMG" : document.source_type === "audio" ? "AUD" : document.source_type === "video" ? "VID" : "TXT"}
                 </span>
                 <span className="nav-copy">
                   <strong>{document.title}</strong>
@@ -321,6 +351,8 @@ export default function App() {
                     {formatDate(selected.created_at)} / {selected.word_count.toLocaleString()} words / {selected.source_type}
                     {selected.source_type === "pdf" ? ` / ${selected.page_count} pages` : ""}
                     {selected.ocr_applied ? " / OCR" : ""}
+                    {selected.duration_seconds ? ` / ${formatTimestamp(selected.duration_seconds)}` : ""}
+                    {selected.language ? ` / ${selected.language.toUpperCase()}` : ""}
                   </p>
                 </div>
                 <button className="danger-button" onClick={() => deleteDocument(selected)}>Delete</button>
@@ -363,6 +395,7 @@ export default function App() {
                         <span>{document.word_count.toLocaleString()} words</span>
                         {document.page_number && <span>Page {document.page_number}</span>}
                         {document.ocr_applied && <span>OCR</span>}
+                        {document.start_seconds != null && <span>{formatTimestamp(document.start_seconds)} - {formatTimestamp(document.end_seconds)}</span>}
                       </div>
                       <h2>{document.title}</h2>
                       <p>{document.snippet ? <HighlightedSnippet value={document.snippet} /> : document.content.slice(0, 220)}</p>
@@ -393,22 +426,22 @@ export default function App() {
               <button type="button" className="close-button" aria-label="Close" onClick={() => setShowImporter(false)}>Close</button>
             </div>
             <label className="file-drop">
-              <strong>Choose a PDF, image, text, or Markdown file</strong>
+              <strong>Choose a document, image, audio, or video file</strong>
               <span>The file stays on this machine.</span>
-              <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.txt,.md,.markdown,application/pdf,image/*,text/plain,text/markdown" onChange={importFile} />
+              <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.mp3,.wav,.m4a,.flac,.ogg,.aac,.opus,.aif,.aiff,.mp4,.mov,.mkv,.webm,.m4v,.txt,.md,.markdown,application/pdf,image/*,audio/*,video/*,text/plain,text/markdown" onChange={importFile} />
             </label>
             <div className="field-row">
               <label>Title<input required maxLength="240" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
-              <label>Format<select disabled={["pdf", "image"].includes(form.source_type)} value={form.source_type} onChange={(event) => setForm({ ...form, source_type: event.target.value })}><option value="text">Plain text</option><option value="markdown">Markdown</option><option value="transcript">Transcript</option><option value="pdf">PDF</option><option value="image">Image OCR</option></select></label>
+              <label>Format<select disabled={["pdf", "image", "audio", "video"].includes(form.source_type)} value={form.source_type} onChange={(event) => setForm({ ...form, source_type: event.target.value })}><option value="text">Plain text</option><option value="markdown">Markdown</option><option value="transcript">Transcript</option><option value="pdf">PDF</option><option value="image">Image OCR</option><option value="audio">Audio</option><option value="video">Video</option></select></label>
             </div>
-            {["pdf", "image"].includes(form.source_type) ? (
-              <div className="pdf-ready"><strong>{uploadFile?.name}</strong><span>Ready for local extraction, OCR, and indexing.</span></div>
+            {["pdf", "image", "audio", "video"].includes(form.source_type) ? (
+              <div className="pdf-ready"><strong>{uploadFile?.name}</strong><span>{["audio", "video"].includes(form.source_type) ? "Ready for local transcription and timestamp indexing." : "Ready for local extraction, OCR, and indexing."}</span></div>
             ) : (
               <label>Content<textarea required value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="Paste text here, or choose a file above." /></label>
             )}
             <div className="modal-actions">
               <button type="button" className="secondary-button" onClick={() => setShowImporter(false)}>Cancel</button>
-              <button className="primary-button" disabled={busy}>{busy ? "Indexing" : "Add and index"}</button>
+              <button className="primary-button" disabled={busy}>{busy ? (["audio", "video"].includes(form.source_type) ? "Transcribing" : "Indexing") : "Add and index"}</button>
             </div>
           </form>
         </div>

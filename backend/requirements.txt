@@ -6,3 +6,4 @@ pypdf==6.0.0
 fastembed==0.8.0
 rapidocr==3.9.2
 pymupdf==1.28.2
+faster-whisper==1.2.1

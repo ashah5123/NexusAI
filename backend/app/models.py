@@ -13,7 +13,9 @@ class HealthResponse(BaseModel):
 class DocumentCreate(BaseModel):
     title: str = Field(min_length=1, max_length=240)
     content: str = Field(min_length=1, max_length=2_000_000)
-    source_type: Literal["text", "markdown", "transcript", "pdf", "image"] = "text"
+    source_type: Literal[
+        "text", "markdown", "transcript", "pdf", "image", "audio", "video"
+    ] = "text"
     source_name: str | None = Field(default=None, max_length=500)
 
     @field_validator("title", "content")
@@ -35,6 +37,8 @@ class DocumentRead(BaseModel):
     word_count: int
     page_count: int
     ocr_applied: bool
+    duration_seconds: float | None
+    language: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -49,6 +53,8 @@ class SearchHit(DocumentRead):
     snippet: str
     chunk_index: int
     page_number: int | None
+    start_seconds: float | None
+    end_seconds: float | None
 
 
 class SearchResponse(BaseModel):
@@ -72,3 +78,9 @@ class EmbeddingStatus(BaseModel):
 class ReindexResult(EmbeddingStatus):
     indexed_now: int
     elapsed_ms: float
+
+
+class TranscriptionStatus(BaseModel):
+    model: str
+    loaded: bool
+    device: str = "cpu-int8"

@@ -17,13 +17,16 @@ from .models import (
     HealthResponse,
     ReindexResult,
     SearchResponse,
+    TranscriptionStatus,
 )
 from .repository import DocumentRepository
 from .ocr import OCRService
+from .transcription import MAX_MEDIA_BYTES, TranscriptionError, TranscriptionService
 
 repository = DocumentRepository()
 embedding_service = EmbeddingService()
 ocr_service = OCRService()
+transcription_service = TranscriptionService()
 
 
 @asynccontextmanager
@@ -32,7 +35,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="NexusAI API", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.6.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -113,6 +116,42 @@ def upload_image(
     )
 
 
+@app.post("/api/documents/media", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
+def upload_media(
+    data: Annotated[bytes, Body(media_type="application/octet-stream")],
+    filename: Annotated[str, Query(min_length=1, max_length=500)],
+    title: Annotated[str | None, Query(min_length=1, max_length=240)] = None,
+) -> DocumentRead:
+    if len(data) > MAX_MEDIA_BYTES:
+        raise HTTPException(status_code=413, detail="Media exceeds the 100 MB local limit")
+    suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    video_extensions = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+    audio_extensions = {
+        ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".opus", ".aif", ".aiff"
+    }
+    if suffix not in video_extensions | audio_extensions:
+        raise HTTPException(status_code=422, detail="Unsupported audio or video format")
+    try:
+        transcription = transcription_service.transcribe(data, suffix)
+    except TranscriptionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    source_type = "video" if suffix in video_extensions else "audio"
+    payload = DocumentCreate(
+        title=title or filename.rsplit(".", 1)[0],
+        content=transcription.text,
+        source_type=source_type,
+        source_name=filename,
+    )
+    return repository.create(
+        payload,
+        timed_passages=[
+            (passage.start, passage.end, passage.text) for passage in transcription.passages
+        ],
+        duration_seconds=transcription.duration_seconds,
+        language=transcription.language,
+    )
+
+
 @app.get("/api/documents", response_model=DocumentList)
 def list_documents(
     limit: Annotated[int, Query(ge=1, le=100)] = 30,
@@ -159,3 +198,11 @@ def reindex_embeddings() -> ReindexResult:
             status_code=503,
             detail="The embedding model could not be downloaded or loaded. Keyword search remains available.",
         ) from exc
+
+
+@app.get("/api/transcription/status", response_model=TranscriptionStatus)
+def transcription_status() -> TranscriptionStatus:
+    return TranscriptionStatus(
+        model=transcription_service.model_name,
+        loaded=transcription_service.loaded,
+    )

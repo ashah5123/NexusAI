@@ -32,6 +32,8 @@ services:
       NEXUSAI_MODEL_CACHE: /app/data/models
       NEXUSAI_EMBEDDING_MODEL: ${NEXUSAI_EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
       NEXUSAI_SEMANTIC_MIN_SCORE: ${NEXUSAI_SEMANTIC_MIN_SCORE:-0.55}
+      NEXUSAI_WHISPER_MODEL: ${NEXUSAI_WHISPER_MODEL:-base}
+      NEXUSAI_WHISPER_CACHE: /app/data/models/whisper
     volumes:
       - nexusai-data:/app/data
 
