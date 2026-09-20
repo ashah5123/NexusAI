@@ -1,12 +1,12 @@
 name: nexusai
 
-# NexusAI Phase 1: a runnable local foundation only — frontend, API, and Postgres+pgvector.
-# No Kafka, Kubernetes, cloud services, or model downloads. Everything binds to 127.0.0.1 only.
+# Memory-efficient local profile. Production infrastructure is not started unless needed.
 
 services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: nexusai-postgres
+    profiles: ["production-data"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nexusai}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local-dev-only}
@@ -27,9 +27,10 @@ services:
     container_name: nexusai-api
     ports:
       - "127.0.0.1:8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
+    environment:
+      NEXUSAI_DB_PATH: /app/data/nexusai.db
+    volumes:
+      - nexusai-data:/app/data
 
   frontend:
     build: ./frontend
@@ -41,3 +42,4 @@ services:
 
 volumes:
   postgres-data:
+  nexusai-data:

@@ -1,0 +1,24 @@
+---
+description: NexusAI production architecture and service adoption guidance
+alwaysApply: true
+---
+
+# Production Architecture
+
+Use this target architecture when making production-oriented decisions for NexusAI:
+
+- Next.js and TypeScript for the web application.
+- FastAPI for APIs and AI orchestration.
+- PostgreSQL with pgvector for metadata and vector search.
+- S3-compatible object storage for documents, images, audio, and generated speech.
+- Redis for caching, rate limiting, and short background jobs.
+- Temporal only after ingestion workflows require durable execution.
+- Qdrant only after pgvector no longer meets measured retrieval requirements.
+- Managed embedding and LLM APIs initially; use vLLM on dedicated NVIDIA infrastructure when self-hosting is justified.
+- Whisper or a managed service for speech-to-text.
+- Kokoro, Piper, or a managed neural voice provider for production text-to-speech.
+- OpenTelemetry, Prometheus, and Grafana for traces, metrics, logs, and dashboards.
+- GitHub Actions for CI/CD.
+- Prefer managed containers; adopt Kubernetes only when traffic and team operations justify it.
+
+Keep local development lightweight enough for a 16 GB Apple Silicon Mac. Treat production services as replaceable adapters and add them only when the relevant production requirement is being implemented.
