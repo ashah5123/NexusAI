@@ -3,12 +3,15 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.error import URLError
 
 import numpy as np
 import pymupdf
 from PIL import Image, ImageDraw
 
 from app.models import DocumentCreate
+from app.generation import OllamaAnswerService
 from app.ingestion import IngestionError, extract_image, extract_pdf
 from app.ocr import OCRService
 from app.repository import CHUNK_OVERLAP, CHUNK_WORDS, DocumentRepository, split_chunks
@@ -59,6 +62,31 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertFalse(document.ocr_applied)
         self.assertTrue(self.repository.delete(document.id))
         self.assertEqual(self.repository.list(10, 0).total, 0)
+
+    def test_retrieval_keeps_full_passage_for_grounded_answers(self) -> None:
+        self.repository.create(
+            DocumentCreate(title="Atlas notes", content="Maya owns the Atlas release on October 14.")
+        )
+
+        passages, warning = self.repository.retrieve("Atlas release", 6, FakeEmbedder())
+
+        self.assertEqual(passages[0]["passage"], "Maya owns the Atlas release on October 14.")
+        self.assertIn("keyword evidence", warning)
+
+    def test_answer_service_falls_back_to_retrieved_evidence(self) -> None:
+        service = OllamaAnswerService()
+        passages = [{
+            "id": "doc-1", "title": "Atlas notes", "source_type": "text",
+            "page_number": None, "start_seconds": None, "end_seconds": None,
+            "passage": "Maya owns the Atlas release.",
+        }]
+
+        with patch("app.generation.urlopen", side_effect=URLError("offline")):
+            result = service.answer("Who owns Atlas?", passages)
+
+        self.assertFalse(result.generated)
+        self.assertEqual(result.citations[0].document_id, "doc-1")
+        self.assertIn("unavailable", result.answer)
 
     def test_page_aware_chunks_preserve_pdf_citation(self) -> None:
         payload = DocumentCreate(

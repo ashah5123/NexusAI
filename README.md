@@ -49,6 +49,18 @@ one document and select **Enable semantic search**. The first run downloads the 
 `BAAI/bge-small-en-v1.5` model into `backend/data/models`; subsequent runs use the local cache. The
 model is loaded only after semantic search is enabled.
 
+## Grounded local answers
+
+NexusAI can answer questions using only passages retrieved from your library. Install Ollama, then run:
+
+```bash
+ollama serve
+ollama pull qwen3:1.7b
+```
+
+The **Ask AI** workspace shows the passages used for each answer. If Ollama is stopped, it falls back
+to evidence-only results so retrieval remains useful.
+
 The first audio or video upload downloads the multilingual Whisper `base` model into
 `backend/data/models/whisper`. Transcription runs in an isolated CPU-int8 worker and releases model
 memory when the upload finishes. This also keeps native media libraries isolated from the OCR

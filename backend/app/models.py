@@ -66,6 +66,44 @@ class SearchResponse(BaseModel):
     warning: str | None = None
 
 
+class AnswerRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+
+    @field_validator("question")
+    @classmethod
+    def reject_blank_question(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class Citation(BaseModel):
+    number: int
+    document_id: str
+    title: str
+    source_type: str
+    page_number: int | None
+    start_seconds: float | None
+    end_seconds: float | None
+    passage: str
+
+
+class AnswerResponse(BaseModel):
+    question: str
+    answer: str
+    citations: list[Citation]
+    model: str
+    generated: bool
+    elapsed_ms: float
+    warning: str | None = None
+
+
+class AnswerStatus(BaseModel):
+    model: str
+    available: bool
+
+
 class EmbeddingStatus(BaseModel):
     model: str
     total_chunks: int

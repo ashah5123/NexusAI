@@ -48,7 +48,10 @@ export default function App() {
   const [documents, setDocuments] = useState([]);
   const [query, setQuery] = useState("");
   const [searchMode, setSearchMode] = useState("hybrid");
+  const [workspaceMode, setWorkspaceMode] = useState("search");
   const [searchMeta, setSearchMeta] = useState(null);
+  const [answer, setAnswer] = useState(null);
+  const [answerStatus, setAnswerStatus] = useState(null);
   const [results, setResults] = useState([]);
   const [selected, setSelected] = useState(null);
   const [showImporter, setShowImporter] = useState(false);
@@ -79,6 +82,7 @@ export default function App() {
       .catch(() => setApiStatus("offline"));
     loadDocuments().catch((err) => setError(err.message));
     loadEmbeddingStatus().catch((err) => setError(err.message));
+    api("/api/answers/status").then(setAnswerStatus).catch(() => setAnswerStatus(null));
   }, [loadDocuments, loadEmbeddingStatus]);
 
   useEffect(() => {
@@ -105,12 +109,25 @@ export default function App() {
     if (!normalized) {
       setSearchMeta(null);
       setResults([]);
+      setAnswer(null);
       return;
     }
     setBusy(true);
     setError("");
     try {
+      if (workspaceMode === "ask") {
+        const data = await api("/api/answers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: normalized }),
+        });
+        setAnswer(data);
+        setSearchMeta(null);
+        setSelected(null);
+        return;
+      }
       const data = await api(`/api/search?q=${encodeURIComponent(normalized)}&mode=${searchMode}`);
+      setAnswer(null);
       setResults(data.items);
       setSearchMeta({ total: data.total, elapsed: data.elapsed_ms, mode: data.mode, warning: data.warning });
     } catch (err) {
@@ -238,6 +255,11 @@ export default function App() {
     setSpeaking(false);
   }
 
+  function openCitation(citation) {
+    const document = documents.find((item) => item.id === citation.document_id);
+    if (document) setSelected(document);
+  }
+
   async function enableSemanticSearch() {
     setIndexing(true);
     setError("");
@@ -263,6 +285,17 @@ export default function App() {
           <span className="brand-mark">N</span>
           <span>NexusAI</span>
         </button>
+        <nav className="workspace-tabs" aria-label="Workspace mode">
+          {["search", "ask"].map((mode) => (
+            <button
+              key={mode}
+              className={workspaceMode === mode ? "active" : ""}
+              onClick={() => { setWorkspaceMode(mode); setSelected(null); setAnswer(null); setSearchMeta(null); }}
+            >
+              {mode === "search" ? "Search" : "Ask AI"}
+            </button>
+          ))}
+        </nav>
         <div className={`status status-${apiStatus}`}>
           <span className="status-dot" />
           {apiStatus}
@@ -297,19 +330,23 @@ export default function App() {
         </aside>
 
         <section className="content-area">
-          <form className="search-bar" onSubmit={runSearch}>
-            <label htmlFor="search">Search your knowledge</label>
+          <form className={`search-bar ${workspaceMode === "ask" ? "ask-bar" : ""}`} onSubmit={runSearch}>
+            <div className="query-heading">
+              <label htmlFor="search">{workspaceMode === "ask" ? "Ask your library" : "Search your knowledge"}</label>
+              {workspaceMode === "ask" && <span className={answerStatus?.available ? "model-ready" : "model-offline"}>{answerStatus?.available ? `${answerStatus.model} ready` : "Local model offline"}</span>}
+            </div>
             <div className="search-control">
               <input
                 id="search"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Try a phrase, topic, or exact term"
+                placeholder={workspaceMode === "ask" ? "Ask a question answered from your documents" : "Try a phrase, topic, or exact term"}
               />
-              {query && <button type="button" className="clear-button" onClick={() => { setQuery(""); setSearchMeta(null); }}>Clear</button>}
-              <button className="search-button" disabled={busy}>{busy ? "Searching" : "Search"}</button>
+              {query && <button type="button" className="clear-button" onClick={() => { setQuery(""); setSearchMeta(null); setAnswer(null); }}>Clear</button>}
+              <button className="search-button" disabled={busy}>{busy ? (workspaceMode === "ask" ? "Thinking" : "Searching") : (workspaceMode === "ask" ? "Ask" : "Search")}</button>
             </div>
-            <div className="search-options">
+            <div className={`search-options ${workspaceMode === "ask" ? "ask-options" : ""}`}>
+              {workspaceMode === "search" && (
               <div className="mode-switch" aria-label="Search mode">
                 {["hybrid", "keyword", "semantic"].map((mode) => (
                   <button
@@ -322,6 +359,7 @@ export default function App() {
                   </button>
                 ))}
               </div>
+              )}
               <div className="embedding-state">
                 <span>
                   {embeddingStatus?.ready
@@ -374,6 +412,29 @@ export default function App() {
               </div>
               <div className="document-content">{selected.content}</div>
             </article>
+          ) : answer ? (
+            <section className="answer-view">
+              <div className="answer-header">
+                <p className="eyebrow">Grounded answer</p>
+                <h1>{answer.question}</h1>
+                <span>{answer.generated ? `Generated locally with ${answer.model}` : "Evidence mode"} / {answer.elapsed_ms} ms</span>
+              </div>
+              {answer.warning && <div className="search-warning">{answer.warning}</div>}
+              <div className="answer-copy">{answer.answer}</div>
+              <div className="evidence-heading"><h2>Sources</h2><span>{answer.citations.length} passages</span></div>
+              <div className="evidence-list">
+                {answer.citations.map((citation) => (
+                  <button key={`${citation.document_id}-${citation.number}`} className="evidence-row" onClick={() => openCitation(citation)}>
+                    <span className="citation-number">{citation.number}</span>
+                    <span className="evidence-copy">
+                      <strong>{citation.title}</strong>
+                      <small>{citation.source_type}{citation.page_number ? ` / Page ${citation.page_number}` : ""}{citation.start_seconds != null ? ` / ${formatTimestamp(citation.start_seconds)} - ${formatTimestamp(citation.end_seconds)}` : ""}</small>
+                      <span>{citation.passage}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </section>
           ) : (
             <section className="results-view">
               <div className="results-heading">
@@ -408,8 +469,8 @@ export default function App() {
               {!visibleDocuments.length && (
                 <div className="empty-state">
                   <div className="empty-icon">N</div>
-                  <h2>{searchMeta ? "No matching passages" : "Build your local library"}</h2>
-                  <p>{searchMeta ? "Try fewer or more specific terms." : "Add text or Markdown to make it searchable and readable aloud."}</p>
+                  <h2>{searchMeta ? "No matching passages" : workspaceMode === "ask" ? "Ask across your library" : "Build your local library"}</h2>
+                  <p>{searchMeta ? "Try fewer or more specific terms." : workspaceMode === "ask" ? "Your answer will stay grounded in indexed documents and show its sources." : "Add documents or media to make them searchable and readable aloud."}</p>
                   {!searchMeta && <button className="primary-button" onClick={() => setShowImporter(true)}>Add first document</button>}
                 </div>
               )}

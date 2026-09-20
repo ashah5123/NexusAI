@@ -296,6 +296,7 @@ class DocumentRepository:
                 """
                 SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
                     c.start_seconds, c.end_seconds,
+                    c.content AS passage,
                     -bm25(chunks_fts, 7.0, 1.0) AS score,
                     snippet(chunks_fts, 1, '<mark>', '</mark>', ' ... ', 34) AS snippet
                 FROM chunks_fts
@@ -334,7 +335,7 @@ class DocumentRepository:
             item = dict(row)
             item.pop("embedding", None)
             item["score"] = float(np.dot(query_vector, vector) / (query_norm * vector_norm))
-            passage = item.pop("passage")
+            passage = item["passage"]
             item["snippet"] = passage[:320] + (" ..." if len(passage) > 320 else "")
             if item["score"] >= SEMANTIC_MIN_SCORE:
                 candidates.append(item)
@@ -353,6 +354,30 @@ class DocumentRepository:
                     fused[passage_id] = item
         ordered = sorted(fused, key=lambda passage_id: scores[passage_id], reverse=True)[:limit]
         return [{**fused[passage_id], "score": scores[passage_id]} for passage_id in ordered]
+
+    def retrieve(self, query: str, limit: int, embedder) -> tuple[list[dict], str | None]:
+        terms = TOKEN_RE.findall(query)
+        fts_query = " OR ".join(f'"{term}"' for term in terms)
+        if not fts_query:
+            return [], None
+
+        candidate_limit = max(limit * 3, 30)
+        keyword = self._keyword_candidates(fts_query, candidate_limit)
+        semantic: list[dict] = []
+        warning = None
+        status = self.embedding_status(embedder.model_name, embedder.loaded)
+        if status.indexed_chunks:
+            try:
+                semantic = self._semantic_candidates(
+                    embedder.embed_query(query), embedder.model_name, candidate_limit
+                )
+            except Exception:
+                warning = "Semantic retrieval is unavailable; the answer uses keyword evidence."
+        else:
+            warning = "Semantic indexing is not enabled; the answer uses keyword evidence."
+
+        rows = self._fuse(keyword, semantic, limit) if semantic else keyword[:limit]
+        return rows, warning
 
     def search(self, query: str, limit: int, mode: str, embedder) -> SearchResponse:
         started = time.perf_counter()

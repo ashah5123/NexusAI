@@ -8,8 +8,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from .embedding import EmbeddingService
+from .generation import OllamaAnswerService
 from .ingestion import IngestionError, MAX_UPLOAD_BYTES, extract_image, extract_pdf
 from .models import (
+    AnswerRequest,
+    AnswerResponse,
+    AnswerStatus,
     DocumentCreate,
     DocumentList,
     DocumentRead,
@@ -27,6 +31,7 @@ repository = DocumentRepository()
 embedding_service = EmbeddingService()
 ocr_service = OCRService()
 transcription_service = TranscriptionService()
+answer_service = OllamaAnswerService()
 
 
 @asynccontextmanager
@@ -35,7 +40,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="NexusAI API", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.7.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -182,6 +187,17 @@ def search_documents(
     mode: Annotated[Literal["keyword", "semantic", "hybrid"], Query()] = "hybrid",
 ) -> SearchResponse:
     return repository.search(q.strip(), limit, mode, embedding_service)
+
+
+@app.get("/api/answers/status", response_model=AnswerStatus)
+def answer_status() -> AnswerStatus:
+    return AnswerStatus(model=answer_service.model_name, available=answer_service.available())
+
+
+@app.post("/api/answers", response_model=AnswerResponse)
+def answer_question(payload: AnswerRequest) -> AnswerResponse:
+    passages, warning = repository.retrieve(payload.question, 6, embedding_service)
+    return answer_service.answer(payload.question, passages, warning)
 
 
 @app.get("/api/embeddings/status", response_model=EmbeddingStatus)
