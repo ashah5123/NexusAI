@@ -4,3 +4,5 @@ pydantic==2.9.2
 pydantic-settings==2.6.1
 pypdf==6.0.0
 fastembed==0.8.0
+rapidocr==3.9.2
+pymupdf==1.28.2

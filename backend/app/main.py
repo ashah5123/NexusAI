@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from .embedding import EmbeddingService
-from .ingestion import IngestionError, MAX_UPLOAD_BYTES, extract_pdf
+from .ingestion import IngestionError, MAX_UPLOAD_BYTES, extract_image, extract_pdf
 from .models import (
     DocumentCreate,
     DocumentList,
@@ -19,9 +19,11 @@ from .models import (
     SearchResponse,
 )
 from .repository import DocumentRepository
+from .ocr import OCRService
 
 repository = DocumentRepository()
 embedding_service = EmbeddingService()
+ocr_service = OCRService()
 
 
 @asynccontextmanager
@@ -30,7 +32,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="NexusAI API", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.5.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,18 +66,51 @@ def upload_pdf(
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="PDF exceeds the 20 MB local upload limit")
     try:
-        pages = extract_pdf(data)
+        extraction = extract_pdf(data, ocr_service)
     except IngestionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     document_title = title or filename.rsplit(".", 1)[0]
-    content = "\n\n".join(text for _, text in pages)
+    content = "\n\n".join(text for _, text in extraction.pages)
     payload = DocumentCreate(
         title=document_title,
         content=content,
         source_type="pdf",
         source_name=filename,
     )
-    return repository.create(payload, pages=pages)
+    return repository.create(
+        payload,
+        pages=extraction.pages,
+        ocr_applied=extraction.ocr_pages > 0,
+        page_count=extraction.total_pages,
+    )
+
+
+@app.post("/api/documents/image", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
+def upload_image(
+    data: Annotated[bytes, Body(media_type="application/octet-stream")],
+    filename: Annotated[str, Query(min_length=1, max_length=500)],
+    title: Annotated[str | None, Query(min_length=1, max_length=240)] = None,
+) -> DocumentRead:
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image exceeds the 20 MB local upload limit")
+    try:
+        extraction = extract_image(data, ocr_service)
+    except IngestionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    document_title = title or filename.rsplit(".", 1)[0]
+    content = extraction.pages[0][1]
+    payload = DocumentCreate(
+        title=document_title,
+        content=content,
+        source_type="image",
+        source_name=filename,
+    )
+    return repository.create(
+        payload,
+        pages=extraction.pages,
+        ocr_applied=True,
+        page_count=extraction.total_pages,
+    )
 
 
 @app.get("/api/documents", response_model=DocumentList)

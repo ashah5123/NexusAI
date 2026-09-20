@@ -1,11 +1,16 @@
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pymupdf
+from PIL import Image, ImageDraw
 
 from app.models import DocumentCreate
-from app.ingestion import IngestionError, extract_pdf
+from app.ingestion import IngestionError, extract_image, extract_pdf
+from app.ocr import OCRService
 from app.repository import CHUNK_OVERLAP, CHUNK_WORDS, DocumentRepository, split_chunks
 
 
@@ -15,6 +20,19 @@ class FakeEmbedder:
 
     def embed_query(self, _: str) -> np.ndarray:
         return np.array([1.0, 0.0], dtype=np.float32)
+
+
+class FakeOCREngine:
+    def __call__(self, _):
+        return SimpleNamespace(txts=("Scanned contract", "Total due 2026"))
+
+
+def image_bytes(text: str = "Scanned contract") -> bytes:
+    image = Image.new("RGB", (700, 160), "white")
+    ImageDraw.Draw(image).text((30, 50), text, fill="black", font_size=36)
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 class DocumentRepositoryTest(unittest.TestCase):
@@ -37,6 +55,7 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertEqual(results.items[0].id, document.id)
         self.assertIn("<mark>semantic</mark>", results.items[0].snippet)
         self.assertIsNone(results.items[0].page_number)
+        self.assertFalse(document.ocr_applied)
         self.assertTrue(self.repository.delete(document.id))
         self.assertEqual(self.repository.list(10, 0).total, 0)
 
@@ -72,6 +91,29 @@ class DocumentRepositoryTest(unittest.TestCase):
     def test_rejects_non_pdf_bytes(self) -> None:
         with self.assertRaisesRegex(IngestionError, "not a valid PDF"):
             extract_pdf(b"plain text")
+
+    def test_image_ocr_extracts_searchable_text(self) -> None:
+        ocr = OCRService()
+        ocr._engine = FakeOCREngine()
+
+        extraction = extract_image(image_bytes(), ocr)
+
+        self.assertEqual(extraction.pages, [(1, "Scanned contract\nTotal due 2026")])
+        self.assertEqual(extraction.ocr_pages, 1)
+
+    def test_scanned_pdf_routes_page_through_ocr(self) -> None:
+        pdf = pymupdf.open()
+        page = pdf.new_page(width=700, height=160)
+        page.insert_image(page.rect, stream=image_bytes())
+        data = pdf.tobytes()
+        pdf.close()
+        ocr = OCRService()
+        ocr._engine = FakeOCREngine()
+
+        extraction = extract_pdf(data, ocr)
+
+        self.assertEqual(extraction.pages, [(1, "Scanned contract\nTotal due 2026")])
+        self.assertEqual(extraction.ocr_pages, 1)
 
     def test_semantic_search_finds_concept_without_keyword_overlap(self) -> None:
         self.repository.create(

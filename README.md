@@ -2,9 +2,10 @@
 
 Local-first document search and text-to-speech, sized for a 16 GB Apple Silicon Mac.
 
-Phase 4 provides a local document knowledge base with hybrid retrieval: import PDFs, text, and
-Markdown; search page-aware passages by exact wording or semantic meaning; inspect ranked snippets
-with source citations; and read any document aloud with the browser's local speech engine.
+Phase 5 provides a local multimodal knowledge base with hybrid retrieval: import PDFs, scanned
+documents, images, text, and Markdown; search page-aware passages by exact wording or semantic
+meaning; inspect ranked snippets with source citations; and read any document aloud with the
+browser's local speech engine.
 
 ## Stack
 
@@ -13,6 +14,7 @@ with source citations; and read any document aloud with the browser's local spee
 - SQLite with FTS5 full-text ranking
 - pypdf for local PDF text extraction
 - FastEmbed with quantized BGE-small embeddings for semantic retrieval
+- RapidOCR and PyMuPDF for local image and scanned-PDF text recognition
 - Browser Web Speech API for text-to-speech
 - Docker Compose as an optional run path
 
@@ -55,7 +57,7 @@ docker compose up --build
 ```
 
 The default profile starts only the API and frontend. The reserved PostgreSQL/pgvector service can
-be inspected with `docker compose --profile production-data up`, but Phase 4 does not depend on it.
+be inspected with `docker compose --profile production-data up`, but Phase 5 does not depend on it.
 
 ## Verify
 
@@ -67,7 +69,10 @@ cd ../frontend
 npm run build
 ```
 
-Supported ingestion formats are text-based `.pdf`, `.txt`, `.md`, pasted text, and pasted
-transcripts. Documents are split into overlapping passages, and PDF passages retain their page
-numbers. Search supports keyword, semantic, and hybrid modes; hybrid results use Reciprocal Rank
-Fusion. Scanned-PDF OCR, speech-to-text, grounded answers, and neural TTS are subsequent adapters.
+Supported ingestion formats are `.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.tif`, `.tiff`, `.bmp`,
+`.txt`, `.md`, pasted text, and pasted transcripts. Documents are split into overlapping passages,
+and PDF passages retain their page numbers. Pages with embedded text skip OCR; image-only pages are
+rendered at 180 DPI and recognized locally. Uploads are limited to 20 MB, images to 40 megapixels,
+and scanned PDFs to 50 OCR pages per upload. Search supports keyword, semantic, and hybrid modes;
+hybrid results use Reciprocal Rank Fusion. Speech-to-text, grounded answers, and neural TTS are
+subsequent adapters.

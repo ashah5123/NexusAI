@@ -13,7 +13,7 @@ class HealthResponse(BaseModel):
 class DocumentCreate(BaseModel):
     title: str = Field(min_length=1, max_length=240)
     content: str = Field(min_length=1, max_length=2_000_000)
-    source_type: Literal["text", "markdown", "transcript", "pdf"] = "text"
+    source_type: Literal["text", "markdown", "transcript", "pdf", "image"] = "text"
     source_name: str | None = Field(default=None, max_length=500)
 
     @field_validator("title", "content")
@@ -34,6 +34,7 @@ class DocumentRead(BaseModel):
     status: str
     word_count: int
     page_count: int
+    ocr_applied: bool
     created_at: datetime
     updated_at: datetime
 

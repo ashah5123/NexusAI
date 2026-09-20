@@ -123,6 +123,15 @@ export default function App() {
       });
       return;
     }
+    if (file.type.startsWith("image/") || /\.(png|jpe?g|webp|tiff?|bmp)$/i.test(file.name)) {
+      setForm({
+        title: file.name.replace(/\.(png|jpe?g|webp|tiff?|bmp)$/i, ""),
+        content: "",
+        source_type: "image",
+        source_name: file.name,
+      });
+      return;
+    }
     const content = await file.text();
     setForm({
       title: file.name.replace(/\.(txt|md|markdown)$/i, ""),
@@ -137,10 +146,14 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      const created = form.source_type === "pdf" && uploadFile
+      const created = ["pdf", "image"].includes(form.source_type) && uploadFile
         ? await api(
-            `/api/documents/pdf?filename=${encodeURIComponent(uploadFile.name)}&title=${encodeURIComponent(form.title)}`,
-            { method: "POST", headers: { "Content-Type": "application/pdf" }, body: uploadFile },
+            `/api/documents/${form.source_type}?filename=${encodeURIComponent(uploadFile.name)}&title=${encodeURIComponent(form.title)}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": form.source_type === "pdf" ? "application/pdf" : (uploadFile.type || "application/octet-stream") },
+              body: uploadFile,
+            },
           )
         : await api("/api/documents", {
             method: "POST",
@@ -241,7 +254,7 @@ export default function App() {
                 onClick={() => setSelected(document)}
               >
                 <span className="file-type">
-                  {document.source_type === "markdown" ? "MD" : document.source_type === "pdf" ? "PDF" : "TXT"}
+                  {document.source_type === "markdown" ? "MD" : document.source_type === "pdf" ? "PDF" : document.source_type === "image" ? "IMG" : "TXT"}
                 </span>
                 <span className="nav-copy">
                   <strong>{document.title}</strong>
@@ -307,6 +320,7 @@ export default function App() {
                   <p>
                     {formatDate(selected.created_at)} / {selected.word_count.toLocaleString()} words / {selected.source_type}
                     {selected.source_type === "pdf" ? ` / ${selected.page_count} pages` : ""}
+                    {selected.ocr_applied ? " / OCR" : ""}
                   </p>
                 </div>
                 <button className="danger-button" onClick={() => deleteDocument(selected)}>Delete</button>
@@ -348,6 +362,7 @@ export default function App() {
                         <span>{formatDate(document.created_at)}</span>
                         <span>{document.word_count.toLocaleString()} words</span>
                         {document.page_number && <span>Page {document.page_number}</span>}
+                        {document.ocr_applied && <span>OCR</span>}
                       </div>
                       <h2>{document.title}</h2>
                       <p>{document.snippet ? <HighlightedSnippet value={document.snippet} /> : document.content.slice(0, 220)}</p>
@@ -378,16 +393,16 @@ export default function App() {
               <button type="button" className="close-button" aria-label="Close" onClick={() => setShowImporter(false)}>Close</button>
             </div>
             <label className="file-drop">
-              <strong>Choose a PDF, text, or Markdown file</strong>
+              <strong>Choose a PDF, image, text, or Markdown file</strong>
               <span>The file stays on this machine.</span>
-              <input type="file" accept=".pdf,.txt,.md,.markdown,application/pdf,text/plain,text/markdown" onChange={importFile} />
+              <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.txt,.md,.markdown,application/pdf,image/*,text/plain,text/markdown" onChange={importFile} />
             </label>
             <div className="field-row">
               <label>Title<input required maxLength="240" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
-              <label>Format<select disabled={form.source_type === "pdf"} value={form.source_type} onChange={(event) => setForm({ ...form, source_type: event.target.value })}><option value="text">Plain text</option><option value="markdown">Markdown</option><option value="transcript">Transcript</option><option value="pdf">PDF</option></select></label>
+              <label>Format<select disabled={["pdf", "image"].includes(form.source_type)} value={form.source_type} onChange={(event) => setForm({ ...form, source_type: event.target.value })}><option value="text">Plain text</option><option value="markdown">Markdown</option><option value="transcript">Transcript</option><option value="pdf">PDF</option><option value="image">Image OCR</option></select></label>
             </div>
-            {form.source_type === "pdf" ? (
-              <div className="pdf-ready"><strong>{uploadFile?.name}</strong><span>Ready for page-aware extraction and indexing.</span></div>
+            {["pdf", "image"].includes(form.source_type) ? (
+              <div className="pdf-ready"><strong>{uploadFile?.name}</strong><span>Ready for local extraction, OCR, and indexing.</span></div>
             ) : (
               <label>Content<textarea required value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="Paste text here, or choose a file above." /></label>
             )}

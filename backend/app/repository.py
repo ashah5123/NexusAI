@@ -62,6 +62,7 @@ class DocumentRepository:
                     status TEXT NOT NULL DEFAULT 'ready',
                     word_count INTEGER NOT NULL,
                     page_count INTEGER NOT NULL DEFAULT 1,
+                    ocr_applied INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -105,6 +106,10 @@ class DocumentRepository:
             if "page_count" not in columns:
                 connection.execute(
                     "ALTER TABLE documents ADD COLUMN page_count INTEGER NOT NULL DEFAULT 1"
+                )
+            if "ocr_applied" not in columns:
+                connection.execute(
+                    "ALTER TABLE documents ADD COLUMN ocr_applied INTEGER NOT NULL DEFAULT 0"
                 )
             chunk_columns = {row[1] for row in connection.execute("PRAGMA table_info(chunks)")}
             if "embedding" not in chunk_columns:
@@ -158,17 +163,19 @@ class DocumentRepository:
         self,
         payload: DocumentCreate,
         pages: list[tuple[int, str]] | None = None,
+        ocr_applied: bool = False,
+        page_count: int | None = None,
     ) -> DocumentRead:
         now = datetime.now(UTC).isoformat()
         document_id = str(uuid4())
-        page_count = len(pages) if pages else 1
+        resolved_page_count = page_count or (len(pages) if pages else 1)
         sections: list[tuple[int | None, str]] = pages or [(None, payload.content)]
         with closing(self.connect()) as connection:
             connection.execute(
                 """INSERT INTO documents
-                (id, title, content, source_type, source_name, word_count, page_count,
+                (id, title, content, source_type, source_name, word_count, page_count, ocr_applied,
                  created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     document_id,
                     payload.title,
@@ -176,7 +183,8 @@ class DocumentRepository:
                     payload.source_type,
                     payload.source_name,
                     len(TOKEN_RE.findall(payload.content)),
-                    page_count,
+                    resolved_page_count,
+                    ocr_applied,
                     now,
                     now,
                 ),
