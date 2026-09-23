@@ -2,11 +2,13 @@
 
 Local-first document search and text-to-speech, sized for a 16 GB Apple Silicon Mac.
 
-Phase 8 provides a local multimodal knowledge base with durable background ingestion: import PDFs, scanned
+Phase 9 provides a local multimodal knowledge base with source-aware reading and organization: import PDFs, scanned
 documents, images, audio, video, text, and Markdown; search page-aware or timestamped passages by
 exact wording or semantic meaning; inspect ranked snippets with source citations; and read any
 document or transcript aloud with local speech synthesis. Long-running OCR and transcription jobs
-show progress, survive restarts, and can be cancelled or retried.
+show progress, survive restarts, and can be cancelled or retried. Original sources open in the
+reader at cited pages or timestamps, while collections, tags, favorites, and sorting keep the
+library manageable.
 
 ## Stack
 
@@ -78,7 +80,7 @@ docker compose up --build
 ```
 
 The default profile starts only the API and frontend. The reserved PostgreSQL/pgvector service can
-be inspected with `docker compose --profile production-data up`, but Phase 8 does not depend on it.
+be inspected with `docker compose --profile production-data up`, but Phase 9 does not depend on it.
 
 ## Verify
 
@@ -103,3 +105,5 @@ falls back to the browser Web Speech API.
 PDF, image, audio, and video uploads are copied to `backend/data/uploads` and processed by a single
 local worker. Job state is stored in SQLite, so queued or interrupted imports resume when the API
 restarts. The import activity panel reports each job's stage and supports cancellation and retry.
+Completed source files belong to their documents, so import history can be cleared independently.
+Deleting a document also removes its stored original file.

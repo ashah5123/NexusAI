@@ -194,7 +194,9 @@ class IngestionWorker:
                 self._finish_cancelled(job.id)
                 return True
             self.repository.update_ingestion_job(job.id, stage="Saving passages", progress=80)
-            document = self.repository.create(payload, document_id=job.id, **create_options)
+            document = self.repository.create(
+                payload, document_id=job.id, source_path=input_path, **create_options
+            )
             if self._cancelled(job.id):
                 self._finish_cancelled(job.id, document.id)
                 return True

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import sqlite3
 import time
@@ -15,6 +16,7 @@ from .models import (
     DocumentCreate,
     DocumentList,
     DocumentRead,
+    DocumentUpdate,
     EmbeddingStatus,
     IngestionJob,
     IngestionJobList,
@@ -74,6 +76,10 @@ class DocumentRepository:
                     ocr_applied INTEGER NOT NULL DEFAULT 0,
                     duration_seconds REAL,
                     language TEXT,
+                    collection_name TEXT,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    source_path TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -147,6 +153,28 @@ class DocumentRepository:
                 connection.execute("ALTER TABLE documents ADD COLUMN duration_seconds REAL")
             if "language" not in columns:
                 connection.execute("ALTER TABLE documents ADD COLUMN language TEXT")
+            if "collection_name" not in columns:
+                connection.execute("ALTER TABLE documents ADD COLUMN collection_name TEXT")
+            if "tags_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE documents ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "favorite" not in columns:
+                connection.execute(
+                    "ALTER TABLE documents ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0"
+                )
+            if "source_path" not in columns:
+                connection.execute("ALTER TABLE documents ADD COLUMN source_path TEXT")
+            connection.execute(
+                """UPDATE documents SET source_path = (
+                    SELECT input_path FROM ingestion_jobs
+                    WHERE ingestion_jobs.document_id = documents.id
+                )
+                WHERE source_path IS NULL AND EXISTS (
+                    SELECT 1 FROM ingestion_jobs
+                    WHERE ingestion_jobs.document_id = documents.id
+                )"""
+            )
             chunk_columns = {row[1] for row in connection.execute("PRAGMA table_info(chunks)")}
             if "embedding" not in chunk_columns:
                 connection.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
@@ -209,8 +237,26 @@ class DocumentRepository:
 
     @staticmethod
     def _document(row: sqlite3.Row) -> DocumentRead:
-        fields = DocumentRead.model_fields
-        return DocumentRead(**{key: row[key] for key in fields})
+        data = {
+            key: row[key]
+            for key in DocumentRead.model_fields
+            if key not in {"collection", "tags", "favorite", "source_available"}
+        }
+        data.update(
+            collection=row["collection_name"],
+            tags=json.loads(row["tags_json"] or "[]"),
+            favorite=bool(row["favorite"]),
+            source_available=bool(row["source_path"]),
+        )
+        return DocumentRead(**data)
+
+    @staticmethod
+    def _search_hit(row: dict) -> SearchHit:
+        row["collection"] = row.get("collection_name")
+        row["tags"] = json.loads(row.get("tags_json") or "[]")
+        row["favorite"] = bool(row.get("favorite"))
+        row["source_available"] = bool(row.get("source_path"))
+        return SearchHit(**row)
 
     def create(
         self,
@@ -222,6 +268,7 @@ class DocumentRepository:
         duration_seconds: float | None = None,
         language: str | None = None,
         document_id: str | None = None,
+        source_path: Path | None = None,
     ) -> DocumentRead:
         now = datetime.now(UTC).isoformat()
         document_id = document_id or str(uuid4())
@@ -236,8 +283,8 @@ class DocumentRepository:
             connection.execute(
                 """INSERT INTO documents
                 (id, title, content, source_type, source_name, word_count, page_count, ocr_applied,
-                 duration_seconds, language, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 duration_seconds, language, source_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     document_id,
                     payload.title,
@@ -249,6 +296,7 @@ class DocumentRepository:
                     ocr_applied,
                     duration_seconds,
                     language,
+                    str(source_path) if source_path else None,
                     now,
                     now,
                 ),
@@ -397,12 +445,57 @@ class DocumentRepository:
             connection.commit()
         return cursor.rowcount + cancelled
 
+    def cleanup_ingestion_jobs(self) -> tuple[int, list[Path]]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """SELECT input_path, status FROM ingestion_jobs
+                WHERE status IN ('completed', 'failed', 'cancelled')"""
+            ).fetchall()
+            cursor = connection.execute(
+                """DELETE FROM ingestion_jobs
+                WHERE status IN ('completed', 'failed', 'cancelled')"""
+            )
+            connection.commit()
+        disposable = [Path(row["input_path"]) for row in rows if row["status"] != "completed"]
+        return cursor.rowcount, disposable
+
     def get(self, document_id: str) -> DocumentRead | None:
         with closing(self.connect()) as connection:
             row = connection.execute(
                 "SELECT * FROM documents WHERE id = ?", (document_id,)
             ).fetchone()
         return self._document(row) if row else None
+
+    def source_path(self, document_id: str) -> Path | None:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT source_path FROM documents WHERE id = ?", (document_id,)
+            ).fetchone()
+        return Path(row["source_path"]) if row and row["source_path"] else None
+
+    def update(self, document_id: str, payload: DocumentUpdate) -> DocumentRead | None:
+        current = self.get(document_id)
+        if current is None:
+            return None
+        fields = payload.model_fields_set
+        title = payload.title if "title" in fields else current.title
+        collection = payload.collection if "collection" in fields else current.collection
+        tags = payload.tags if "tags" in fields else current.tags
+        favorite = payload.favorite if "favorite" in fields else current.favorite
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """UPDATE documents
+                SET title = ?, collection_name = ?, tags_json = ?, favorite = ?, updated_at = ?
+                WHERE id = ?""",
+                (title, collection, json.dumps(tags), favorite, now, document_id),
+            )
+            if title != current.title:
+                connection.execute(
+                    "UPDATE chunks SET title = ? WHERE document_id = ?", (title, document_id)
+                )
+            connection.commit()
+        return self.get(document_id)
 
     def list(self, limit: int, offset: int) -> DocumentList:
         with closing(self.connect()) as connection:
@@ -574,7 +667,7 @@ class DocumentRepository:
             rows = semantic[:limit]
         else:
             rows = self._fuse(keyword, semantic, limit) if semantic else keyword[:limit]
-        items = [SearchHit(**row) for row in rows]
+        items = [self._search_hit(row) for row in rows]
         elapsed = round((time.perf_counter() - started) * 1000, 2)
         return SearchResponse(
             query=query,

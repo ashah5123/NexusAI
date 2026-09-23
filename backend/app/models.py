@@ -39,8 +39,47 @@ class DocumentRead(BaseModel):
     ocr_applied: bool
     duration_seconds: float | None
     language: str | None
+    collection: str | None
+    tags: list[str]
+    favorite: bool
+    source_available: bool
     created_at: datetime
     updated_at: datetime
+
+
+class DocumentUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    collection: str | None = Field(default=None, max_length=120)
+    tags: list[str] | None = Field(default=None, max_length=12)
+    favorite: bool | None = None
+
+    @field_validator("title")
+    @classmethod
+    def reject_blank_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("collection")
+    @classmethod
+    def normalize_collection(cls, value: str | None) -> str | None:
+        value = value.strip() if value else None
+        return value or None
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        tags: list[str] = []
+        for item in value:
+            tag = item.strip()[:40]
+            if tag and tag.lower() not in {existing.lower() for existing in tags}:
+                tags.append(tag)
+        return tags
 
 
 class DocumentList(BaseModel):
@@ -66,6 +105,10 @@ class IngestionJob(BaseModel):
 class IngestionJobList(BaseModel):
     items: list[IngestionJob]
     total: int
+
+
+class CleanupResult(BaseModel):
+    removed: int
 
 
 class SearchHit(DocumentRead):

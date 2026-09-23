@@ -1,5 +1,6 @@
 """NexusAI API for local document ingestion and retrieval."""
 
+import mimetypes
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
@@ -16,9 +17,11 @@ from .models import (
     AnswerRequest,
     AnswerResponse,
     AnswerStatus,
+    CleanupResult,
     DocumentCreate,
     DocumentList,
     DocumentRead,
+    DocumentUpdate,
     EmbeddingStatus,
     HealthResponse,
     IngestionJob,
@@ -55,12 +58,12 @@ async def lifespan(_: FastAPI):
         ingestion_worker.stop()
 
 
-app = FastAPI(title="NexusAI API", version="0.9.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.10.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -146,6 +149,14 @@ def list_ingestion_jobs(
     return repository.list_ingestion_jobs(limit)
 
 
+@app.delete("/api/ingestion-jobs", response_model=CleanupResult)
+def cleanup_ingestion_jobs() -> CleanupResult:
+    removed, paths = repository.cleanup_ingestion_jobs()
+    for path in paths:
+        path.unlink(missing_ok=True)
+    return CleanupResult(removed=removed)
+
+
 @app.post("/api/ingestion-jobs/{job_id}/cancel", response_model=IngestionJob)
 def cancel_ingestion_job(job_id: str) -> IngestionJob:
     job = ingestion_worker.cancel(job_id)
@@ -178,10 +189,31 @@ def get_document(document_id: str) -> DocumentRead:
     return document
 
 
+@app.patch("/api/documents/{document_id}", response_model=DocumentRead)
+def update_document(document_id: str, payload: DocumentUpdate) -> DocumentRead:
+    document = repository.update(document_id, payload)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
+
+
+@app.get("/api/documents/{document_id}/source")
+def get_document_source(document_id: str) -> FileResponse:
+    document = repository.get(document_id)
+    path = repository.source_path(document_id)
+    if document is None or path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="Original source file not found")
+    media_type = mimetypes.guess_type(document.source_name or path.name)[0]
+    return FileResponse(path, media_type=media_type or "application/octet-stream")
+
+
 @app.delete("/api/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_document(document_id: str) -> Response:
+    source_path = repository.source_path(document_id)
     if not repository.delete(document_id):
         raise HTTPException(status_code=404, detail="Document not found")
+    if source_path:
+        source_path.unlink(missing_ok=True)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

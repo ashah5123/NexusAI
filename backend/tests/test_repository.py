@@ -10,7 +10,7 @@ import numpy as np
 import pymupdf
 from PIL import Image, ImageDraw
 
-from app.models import DocumentCreate
+from app.models import DocumentCreate, DocumentUpdate
 from app.embedding import EmbeddingService
 from app.generation import OllamaAnswerService
 from app.ingestion import IngestionError, extract_image, extract_pdf
@@ -108,6 +108,35 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertEqual(document.page_count, 2)
         self.assertEqual(results.items[0].page_number, 2)
         self.assertEqual(results.items[0].source_name, "paper.pdf")
+
+    def test_document_metadata_and_source_are_persisted(self) -> None:
+        source_path = Path(self.temp_dir.name) / "paper.pdf"
+        source_path.write_bytes(b"%PDF-source")
+        document = self.repository.create(
+            DocumentCreate(title="Draft paper", content="A searchable source document."),
+            source_path=source_path,
+        )
+
+        updated = self.repository.update(
+            document.id,
+            DocumentUpdate(
+                title="Published paper",
+                collection="Research",
+                tags=["Reference", "reference", "2026"],
+                favorite=True,
+            ),
+        )
+
+        self.assertEqual(updated.title, "Published paper")
+        self.assertEqual(updated.collection, "Research")
+        self.assertEqual(updated.tags, ["Reference", "2026"])
+        self.assertTrue(updated.favorite)
+        self.assertTrue(updated.source_available)
+        self.assertEqual(self.repository.source_path(document.id), source_path)
+        self.assertEqual(
+            self.repository.search("Published", 10, "keyword", FakeEmbedder()).items[0].id,
+            document.id,
+        )
 
     def test_chunking_has_bounded_size_and_overlap(self) -> None:
         words = [f"word{index}" for index in range(CHUNK_WORDS + 20)]
@@ -270,6 +299,29 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertEqual(completed.document_id, queued.id)
         self.assertEqual(document.title, "Scanned invoice")
         self.assertTrue(document.ocr_applied)
+        self.assertTrue(document.source_available)
+
+    def test_job_cleanup_keeps_sources_owned_by_completed_documents(self) -> None:
+        uploads = Path(self.temp_dir.name) / "uploads"
+        uploads.mkdir()
+        completed_path = uploads / "completed.png"
+        failed_path = uploads / "failed.png"
+        completed_path.write_bytes(image_bytes())
+        failed_path.write_bytes(b"invalid")
+        self.repository.create_ingestion_job(
+            "complete-job", "Complete", "image", "complete.png", completed_path
+        )
+        self.repository.update_ingestion_job("complete-job", status="completed")
+        self.repository.create_ingestion_job(
+            "failed-job", "Failed", "image", "failed.png", failed_path
+        )
+        self.repository.update_ingestion_job("failed-job", status="failed")
+
+        removed, disposable = self.repository.cleanup_ingestion_jobs()
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(disposable, [failed_path])
+        self.assertNotIn(completed_path, disposable)
 
     def test_ingestion_job_can_be_cancelled_and_retried(self) -> None:
         ocr = OCRService()
