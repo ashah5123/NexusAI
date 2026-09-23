@@ -5,7 +5,8 @@ from typing import Annotated, Literal
 
 from fastapi import Body, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
+from starlette.background import BackgroundTask
 
 from .embedding import EmbeddingService
 from .generation import OllamaAnswerService
@@ -21,10 +22,13 @@ from .models import (
     HealthResponse,
     ReindexResult,
     SearchResponse,
+    SpeechRequest,
+    SpeechStatus,
     TranscriptionStatus,
 )
 from .repository import DocumentRepository
 from .ocr import OCRService
+from .speech import LocalSpeechService, SpeechError
 from .transcription import MAX_MEDIA_BYTES, TranscriptionError, TranscriptionService
 
 repository = DocumentRepository()
@@ -32,6 +36,7 @@ embedding_service = EmbeddingService()
 ocr_service = OCRService()
 transcription_service = TranscriptionService()
 answer_service = OllamaAnswerService()
+speech_service = LocalSpeechService()
 
 
 @asynccontextmanager
@@ -40,7 +45,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="NexusAI API", version="0.7.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.8.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -198,6 +203,29 @@ def answer_status() -> AnswerStatus:
 def answer_question(payload: AnswerRequest) -> AnswerResponse:
     passages, warning = repository.retrieve(payload.question, 6, embedding_service)
     return answer_service.answer(payload.question, passages, warning)
+
+
+@app.get("/api/speech/status", response_model=SpeechStatus)
+def speech_status() -> SpeechStatus:
+    return SpeechStatus(
+        engine=speech_service.engine,
+        available=speech_service.available(),
+        voices=speech_service.voices(),
+    )
+
+
+@app.post("/api/speech")
+def synthesize_speech(payload: SpeechRequest) -> FileResponse:
+    try:
+        path = speech_service.synthesize(payload.text, payload.voice, payload.rate)
+    except SpeechError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type="audio/aiff",
+        filename="nexusai-speech.aiff",
+        background=BackgroundTask(path.unlink, missing_ok=True),
+    )
 
 
 @app.get("/api/embeddings/status", response_model=EmbeddingStatus)

@@ -2,10 +2,10 @@
 
 Local-first document search and text-to-speech, sized for a 16 GB Apple Silicon Mac.
 
-Phase 6 provides a local multimodal knowledge base with hybrid retrieval: import PDFs, scanned
+Phase 7 provides a local multimodal knowledge base with hybrid retrieval: import PDFs, scanned
 documents, images, audio, video, text, and Markdown; search page-aware or timestamped passages by
 exact wording or semantic meaning; inspect ranked snippets with source citations; and read any
-document or transcript aloud with the browser's local speech engine.
+document or transcript aloud with local speech synthesis.
 
 ## Stack
 
@@ -16,6 +16,7 @@ document or transcript aloud with the browser's local speech engine.
 - FastEmbed with quantized BGE-small embeddings for semantic retrieval
 - RapidOCR and PyMuPDF for local image and scanned-PDF text recognition
 - faster-whisper with CTranslate2 for local timestamped transcription
+- macOS `say` for local speech audio when available
 - Browser Web Speech API for text-to-speech
 - Docker Compose as an optional run path
 
@@ -75,7 +76,7 @@ docker compose up --build
 ```
 
 The default profile starts only the API and frontend. The reserved PostgreSQL/pgvector service can
-be inspected with `docker compose --profile production-data up`, but Phase 6 does not depend on it.
+be inspected with `docker compose --profile production-data up`, but Phase 7 does not depend on it.
 
 ## Verify
 
@@ -93,5 +94,6 @@ Documents are split into overlapping passages; PDFs retain page numbers and tran
 start/end timestamps. Pages with embedded text skip OCR, while image-only pages are rendered at 180
 DPI and recognized locally. Document/image uploads are limited to 20 MB, media uploads to 100 MB,
 images to 40 megapixels, scanned PDFs to 50 OCR pages, and recordings to two hours. Search supports
-keyword, semantic, and hybrid modes using Reciprocal Rank Fusion. Grounded answers and neural TTS
-are subsequent adapters.
+keyword, semantic, and hybrid modes using Reciprocal Rank Fusion. Grounded answers use a local
+Ollama adapter when available. Speech playback uses macOS `say` through the API when available and
+falls back to the browser Web Speech API.

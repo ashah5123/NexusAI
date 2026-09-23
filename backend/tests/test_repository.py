@@ -15,6 +15,7 @@ from app.generation import OllamaAnswerService
 from app.ingestion import IngestionError, extract_image, extract_pdf
 from app.ocr import OCRService
 from app.repository import CHUNK_OVERLAP, CHUNK_WORDS, DocumentRepository, split_chunks
+from app.speech import LocalSpeechService, SpeechError
 from app.transcription import TranscriptionError, TranscriptionService, group_segments
 
 
@@ -211,6 +212,25 @@ class DocumentRepositoryTest(unittest.TestCase):
             service.transcribe(b"not media", ".mp3")
 
         self.assertFalse(service.loaded)
+
+    def test_speech_service_reports_unavailable_without_say(self) -> None:
+        with patch("app.speech.which", return_value=None):
+            service = LocalSpeechService()
+
+        self.assertFalse(service.available())
+        self.assertEqual(service.voices(), [])
+        with self.assertRaisesRegex(SpeechError, "unavailable"):
+            service.synthesize("Hello", None, 180)
+
+    def test_speech_service_parses_macos_voice_names(self) -> None:
+        completed = SimpleNamespace(stdout="Alex                en_US    # Most people recognize me\nSamantha            en_US\n")
+        with patch("app.speech.which", return_value="/usr/bin/say"), patch(
+            "app.speech.subprocess.run",
+            return_value=completed,
+        ):
+            service = LocalSpeechService()
+
+            self.assertEqual(service.voices(), ["Alex", "Samantha"])
 
 
 if __name__ == "__main__":

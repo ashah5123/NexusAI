@@ -11,6 +11,15 @@ async function api(path, options) {
   return response.status === 204 ? null : response.json();
 }
 
+async function apiBlob(path, options) {
+  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail || `Request failed (${response.status})`);
+  }
+  return response.blob();
+}
+
 function HighlightedSnippet({ value }) {
   const parts = value.split(/(<mark>|<\/mark>)/);
   let highlighted = false;
@@ -63,6 +72,8 @@ export default function App() {
   const [voiceName, setVoiceName] = useState("");
   const [rate, setRate] = useState(1);
   const [speaking, setSpeaking] = useState(false);
+  const [speechStatus, setSpeechStatus] = useState(null);
+  const [audioPlayer, setAudioPlayer] = useState(null);
   const [embeddingStatus, setEmbeddingStatus] = useState(null);
   const [indexing, setIndexing] = useState(false);
 
@@ -83,6 +94,7 @@ export default function App() {
     loadDocuments().catch((err) => setError(err.message));
     loadEmbeddingStatus().catch((err) => setError(err.message));
     api("/api/answers/status").then(setAnswerStatus).catch(() => setAnswerStatus(null));
+    api("/api/speech/status").then(setSpeechStatus).catch(() => setSpeechStatus(null));
   }, [loadDocuments, loadEmbeddingStatus]);
 
   useEffect(() => {
@@ -100,8 +112,15 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (speechStatus?.available && speechStatus.voices?.length) {
+      setVoiceName((current) => speechStatus.voices.includes(current) ? current : speechStatus.voices[0]);
+    }
+  }, [speechStatus]);
+
   const visibleDocuments = searchMeta ? results : documents;
   const selectedVoice = useMemo(() => voices.find((voice) => voice.name === voiceName), [voices, voiceName]);
+  const speechVoices = speechStatus?.available && speechStatus.voices?.length ? speechStatus.voices : voices.map((voice) => voice.name);
 
   async function runSearch(event) {
     event.preventDefault();
@@ -235,7 +254,7 @@ export default function App() {
     }
   }
 
-  function speak(document) {
+  function speakInBrowser(document) {
     if (!("speechSynthesis" in window)) {
       setError("Text-to-speech is not supported by this browser.");
       return;
@@ -250,7 +269,54 @@ export default function App() {
     setSpeaking(true);
   }
 
+  async function speak(document) {
+    stopSpeaking();
+    if (speechStatus?.available) {
+      setBusy(true);
+      setError("");
+      try {
+        const blob = await apiBlob("/api/speech", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: `${document.title}. ${document.content}`.slice(0, 20_000),
+            voice: voiceName || null,
+            rate: Math.round(rate * 180),
+          }),
+        });
+        const url = URL.createObjectURL(blob);
+        const player = new Audio(url);
+        player.onended = () => {
+          URL.revokeObjectURL(url);
+          setSpeaking(false);
+          setAudioPlayer(null);
+        };
+        player.onerror = () => {
+          URL.revokeObjectURL(url);
+          setSpeaking(false);
+          setAudioPlayer(null);
+          speakInBrowser(document);
+        };
+        setAudioPlayer(player);
+        setSpeaking(true);
+        await player.play();
+      } catch (err) {
+        speakInBrowser(document);
+        setError(`Local speech unavailable, using browser voice. ${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    speakInBrowser(document);
+  }
+
   function stopSpeaking() {
+    if (audioPlayer) {
+      audioPlayer.pause();
+      audioPlayer.currentTime = 0;
+      setAudioPlayer(null);
+    }
     window.speechSynthesis?.cancel();
     setSpeaking(false);
   }
@@ -397,12 +463,12 @@ export default function App() {
               </div>
               <div className="speech-panel">
                 <button className="speech-button" onClick={() => speaking ? stopSpeaking() : speak(selected)}>
-                  {speaking ? "Stop reading" : "Read aloud"}
+                  {speaking ? "Stop reading" : busy ? "Preparing" : "Read aloud"}
                 </button>
                 <label>
                   Voice
                   <select value={voiceName} onChange={(event) => setVoiceName(event.target.value)}>
-                    {voices.map((voice) => <option key={voice.name} value={voice.name}>{voice.name} ({voice.lang})</option>)}
+                    {speechVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
                   </select>
                 </label>
                 <label>

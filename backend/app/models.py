@@ -104,6 +104,26 @@ class AnswerStatus(BaseModel):
     available: bool
 
 
+class SpeechRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=20_000)
+    voice: str | None = Field(default=None, max_length=120)
+    rate: int = Field(default=180, ge=80, le=320)
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class SpeechStatus(BaseModel):
+    engine: str
+    available: bool
+    voices: list[str] = []
+
+
 class EmbeddingStatus(BaseModel):
     model: str
     total_chunks: int
