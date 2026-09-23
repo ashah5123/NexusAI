@@ -48,6 +48,26 @@ class DocumentList(BaseModel):
     total: int
 
 
+class IngestionJob(BaseModel):
+    id: str
+    title: str
+    source_type: Literal["pdf", "image", "audio", "video"]
+    source_name: str
+    status: Literal["queued", "running", "completed", "failed", "cancelled"]
+    stage: str
+    progress: int = Field(ge=0, le=100)
+    error: str | None
+    document_id: str | None
+    cancel_requested: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class IngestionJobList(BaseModel):
+    items: list[IngestionJob]
+    total: int
+
+
 class SearchHit(DocumentRead):
     score: float
     snippet: str

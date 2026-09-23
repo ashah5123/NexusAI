@@ -2,10 +2,11 @@
 
 Local-first document search and text-to-speech, sized for a 16 GB Apple Silicon Mac.
 
-Phase 7 provides a local multimodal knowledge base with hybrid retrieval: import PDFs, scanned
+Phase 8 provides a local multimodal knowledge base with durable background ingestion: import PDFs, scanned
 documents, images, audio, video, text, and Markdown; search page-aware or timestamped passages by
 exact wording or semantic meaning; inspect ranked snippets with source citations; and read any
-document or transcript aloud with local speech synthesis.
+document or transcript aloud with local speech synthesis. Long-running OCR and transcription jobs
+show progress, survive restarts, and can be cancelled or retried.
 
 ## Stack
 
@@ -18,6 +19,7 @@ document or transcript aloud with local speech synthesis.
 - faster-whisper with CTranslate2 for local timestamped transcription
 - macOS `say` for local speech audio when available
 - Browser Web Speech API for text-to-speech
+- SQLite-backed background ingestion worker
 - Docker Compose as an optional run path
 
 The production target is recorded in `.cursor/rules/production-architecture.mdc`. Local adapters
@@ -76,7 +78,7 @@ docker compose up --build
 ```
 
 The default profile starts only the API and frontend. The reserved PostgreSQL/pgvector service can
-be inspected with `docker compose --profile production-data up`, but Phase 7 does not depend on it.
+be inspected with `docker compose --profile production-data up`, but Phase 8 does not depend on it.
 
 ## Verify
 
@@ -97,3 +99,7 @@ images to 40 megapixels, scanned PDFs to 50 OCR pages, and recordings to two hou
 keyword, semantic, and hybrid modes using Reciprocal Rank Fusion. Grounded answers use a local
 Ollama adapter when available. Speech playback uses macOS `say` through the API when available and
 falls back to the browser Web Speech API.
+
+PDF, image, audio, and video uploads are copied to `backend/data/uploads` and processed by a single
+local worker. Job state is stored in SQLite, so queued or interrupted imports resume when the API
+restarts. The import activity panel reports each job's stage and supports cancellation and retry.

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from io import BytesIO
+from typing import Callable
 
 import pymupdf
 from pypdf import PdfReader
@@ -23,7 +24,12 @@ class ExtractionResult:
     total_pages: int = 1
 
 
-def extract_pdf(data: bytes, ocr: OCRService | None = None) -> ExtractionResult:
+def extract_pdf(
+    data: bytes,
+    ocr: OCRService | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    on_ocr_progress: Callable[[int, int], None] | None = None,
+) -> ExtractionResult:
     if not data:
         raise IngestionError("The uploaded PDF is empty")
     if len(data) > MAX_UPLOAD_BYTES:
@@ -58,7 +64,11 @@ def extract_pdf(data: bytes, ocr: OCRService | None = None) -> ExtractionResult:
             )
         try:
             with pymupdf.open(stream=data, filetype="pdf") as document:
-                for page_number in pages_needing_ocr:
+                for index, page_number in enumerate(pages_needing_ocr, 1):
+                    if should_cancel and should_cancel():
+                        raise IngestionError("Import cancelled")
+                    if on_ocr_progress:
+                        on_ocr_progress(index, len(pages_needing_ocr))
                     page = document[page_number - 1]
                     pixmap = page.get_pixmap(dpi=180, colorspace=pymupdf.csRGB, alpha=False)
                     try:

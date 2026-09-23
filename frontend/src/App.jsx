@@ -1,4 +1,30 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Activity,
+  ArrowLeft,
+  ArrowRight,
+  BookOpen,
+  CheckCircle2,
+  FileAudio,
+  FileImage,
+  FileText,
+  FileVideo,
+  Headphones,
+  LayoutList,
+  LoaderCircle,
+  Menu,
+  MessageSquareText,
+  Plus,
+  RefreshCw,
+  ScanText,
+  Search,
+  Sparkles,
+  Square,
+  Trash2,
+  UploadCloud,
+  Volume2,
+  X,
+} from "lucide-react";
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -52,6 +78,13 @@ function formatTimestamp(value) {
     : `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
+function SourceIcon({ type, size = 17 }) {
+  if (type === "image") return <FileImage size={size} />;
+  if (["audio", "transcript"].includes(type)) return <FileAudio size={size} />;
+  if (type === "video") return <FileVideo size={size} />;
+  return <FileText size={size} />;
+}
+
 export default function App() {
   const [apiStatus, setApiStatus] = useState("checking");
   const [documents, setDocuments] = useState([]);
@@ -76,6 +109,12 @@ export default function App() {
   const [audioPlayer, setAudioPlayer] = useState(null);
   const [embeddingStatus, setEmbeddingStatus] = useState(null);
   const [indexing, setIndexing] = useState(false);
+  const [ingestionJobs, setIngestionJobs] = useState([]);
+  const [showActivity, setShowActivity] = useState(true);
+  const [libraryFilter, setLibraryFilter] = useState("all");
+  const [mobileLibraryOpen, setMobileLibraryOpen] = useState(false);
+  const completedJobs = useRef(new Set());
+  const searchInput = useRef(null);
 
   const loadDocuments = useCallback(async () => {
     const data = await api("/api/documents");
@@ -87,15 +126,40 @@ export default function App() {
     setEmbeddingStatus(data);
   }, []);
 
+  const loadIngestionJobs = useCallback(async () => {
+    const data = await api("/api/ingestion-jobs?limit=8");
+    setIngestionJobs(data.items);
+  }, []);
+
   useEffect(() => {
     api("/health")
       .then((data) => setApiStatus(data.database === "connected" ? "online" : "degraded"))
       .catch(() => setApiStatus("offline"));
     loadDocuments().catch((err) => setError(err.message));
     loadEmbeddingStatus().catch((err) => setError(err.message));
+    loadIngestionJobs().catch((err) => setError(err.message));
     api("/api/answers/status").then(setAnswerStatus).catch(() => setAnswerStatus(null));
     api("/api/speech/status").then(setSpeechStatus).catch(() => setSpeechStatus(null));
-  }, [loadDocuments, loadEmbeddingStatus]);
+  }, [loadDocuments, loadEmbeddingStatus, loadIngestionJobs]);
+
+  useEffect(() => {
+    if (!ingestionJobs.some((job) => ["queued", "running"].includes(job.status))) return undefined;
+    const timer = window.setInterval(() => {
+      loadIngestionJobs().catch((err) => setError(err.message));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [ingestionJobs, loadIngestionJobs]);
+
+  useEffect(() => {
+    const newlyCompleted = ingestionJobs.filter(
+      (job) => job.status === "completed" && !completedJobs.current.has(job.id),
+    );
+    ingestionJobs.filter((job) => job.status === "completed").forEach((job) => completedJobs.current.add(job.id));
+    if (newlyCompleted.length) {
+      loadDocuments().catch((err) => setError(err.message));
+      loadEmbeddingStatus().catch((err) => setError(err.message));
+    }
+  }, [ingestionJobs, loadDocuments, loadEmbeddingStatus]);
 
   useEffect(() => {
     if (!("speechSynthesis" in window)) return undefined;
@@ -118,9 +182,33 @@ export default function App() {
     }
   }, [speechStatus]);
 
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      const target = event.target;
+      const isEditing = ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName);
+      if (event.key === "/" && !isEditing) {
+        event.preventDefault();
+        searchInput.current?.focus();
+      }
+      if (event.key === "Escape") {
+        setShowImporter(false);
+        setMobileLibraryOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   const visibleDocuments = searchMeta ? results : documents;
   const selectedVoice = useMemo(() => voices.find((voice) => voice.name === voiceName), [voices, voiceName]);
   const speechVoices = speechStatus?.available && speechStatus.voices?.length ? speechStatus.voices : voices.map((voice) => voice.name);
+  const activeJobs = ingestionJobs.filter((job) => ["queued", "running"].includes(job.status)).length;
+  const filteredLibrary = useMemo(() => documents.filter((document) => {
+    if (libraryFilter === "text") return ["text", "markdown", "transcript"].includes(document.source_type);
+    if (libraryFilter === "scan") return ["pdf", "image"].includes(document.source_type);
+    if (libraryFilter === "media") return ["audio", "video"].includes(document.source_type);
+    return true;
+  }), [documents, libraryFilter]);
 
   async function runSearch(event) {
     event.preventDefault();
@@ -229,15 +317,28 @@ export default function App() {
       setShowImporter(false);
       setForm({ title: "", content: "", source_type: "text", source_name: null });
       setUploadFile(null);
-      setSelected(created);
       setSearchMeta(null);
       setResults([]);
-      await loadDocuments();
-      await loadEmbeddingStatus();
+      if (binarySource) {
+        setIngestionJobs((current) => [created, ...current.filter((job) => job.id !== created.id)]);
+      } else {
+        setSelected(created);
+        await loadDocuments();
+        await loadEmbeddingStatus();
+      }
     } catch (err) {
       setError(err.message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function updateIngestionJob(job, action) {
+    try {
+      const updated = await api(`/api/ingestion-jobs/${job.id}/${action}`, { method: "POST" });
+      setIngestionJobs((current) => current.map((item) => item.id === updated.id ? updated : item));
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -347,51 +448,51 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
+        <button className="icon-button mobile-menu" title="Open library" aria-label="Open library" onClick={() => setMobileLibraryOpen(true)}><Menu size={19} /></button>
         <button className="brand" onClick={() => { setSelected(null); setSearchMeta(null); }}>
           <span className="brand-mark">N</span>
           <span>NexusAI</span>
         </button>
         <nav className="workspace-tabs" aria-label="Workspace mode">
-          {["search", "ask"].map((mode) => (
-            <button
-              key={mode}
-              className={workspaceMode === mode ? "active" : ""}
-              onClick={() => { setWorkspaceMode(mode); setSelected(null); setAnswer(null); setSearchMeta(null); }}
-            >
-              {mode === "search" ? "Search" : "Ask AI"}
-            </button>
-          ))}
+          <button className={workspaceMode === "search" ? "active" : ""} onClick={() => { setWorkspaceMode("search"); setSelected(null); setAnswer(null); setSearchMeta(null); }}><Search size={15} />Search</button>
+          <button className={workspaceMode === "ask" ? "active" : ""} onClick={() => { setWorkspaceMode("ask"); setSelected(null); setAnswer(null); setSearchMeta(null); }}><MessageSquareText size={15} />Ask</button>
         </nav>
-        <div className={`status status-${apiStatus}`}>
-          <span className="status-dot" />
-          {apiStatus}
-        </div>
-        <button className="primary-button" onClick={() => setShowImporter(true)}>Add document</button>
+        {!!ingestionJobs.length && (
+          <button className={`icon-button activity-button ${showActivity ? "active" : ""}`} title="Import activity" aria-label="Toggle import activity" onClick={() => setShowActivity((current) => !current)}>
+            <Activity size={18} />
+            {!!activeJobs && <span>{activeJobs}</span>}
+          </button>
+        )}
+        <div className={`status status-${apiStatus}`} title={`Service ${apiStatus}`}><span className="status-dot" />{apiStatus}</div>
+        <button className="primary-button add-button" onClick={() => setShowImporter(true)}><Plus size={17} /><span>Add document</span></button>
       </header>
 
       <main className="workspace">
-        <aside className="sidebar">
+        {mobileLibraryOpen && <button className="sidebar-scrim" aria-label="Close library" onClick={() => setMobileLibraryOpen(false)} />}
+        <aside className={`sidebar ${mobileLibraryOpen ? "mobile-open" : ""}`}>
           <div className="sidebar-heading">
-            <span>Library</span>
-            <span className="count">{documents.length}</span>
+            <div><BookOpen size={17} /><span>Library</span><span className="count">{documents.length}</span></div>
+            <button className="icon-button sidebar-close" title="Close library" aria-label="Close library" onClick={() => setMobileLibraryOpen(false)}><X size={18} /></button>
+          </div>
+          <div className="library-filters" aria-label="Filter library">
+            {[
+              ["all", "All sources", LayoutList],
+              ["text", "Text", FileText],
+              ["scan", "PDF and images", ScanText],
+              ["media", "Audio and video", Headphones],
+            ].map(([value, label, Icon]) => (
+              <button key={value} className={libraryFilter === value ? "active" : ""} title={label} aria-label={label} onClick={() => setLibraryFilter(value)}><Icon size={16} /></button>
+            ))}
           </div>
           <nav className="document-nav" aria-label="Document library">
-            {documents.map((document) => (
-              <button
-                className={selected?.id === document.id ? "nav-item active" : "nav-item"}
-                key={document.id}
-                onClick={() => setSelected(document)}
-              >
-                <span className="file-type">
-                  {document.source_type === "markdown" ? "MD" : document.source_type === "pdf" ? "PDF" : document.source_type === "image" ? "IMG" : document.source_type === "audio" ? "AUD" : document.source_type === "video" ? "VID" : "TXT"}
-                </span>
-                <span className="nav-copy">
-                  <strong>{document.title}</strong>
-                  <small>{document.word_count.toLocaleString()} words</small>
-                </span>
+            {filteredLibrary.map((document) => (
+              <button className={selected?.id === document.id ? "nav-item active" : "nav-item"} key={document.id} onClick={() => { setSelected(document); setMobileLibraryOpen(false); }}>
+                <span className={`source-icon source-${document.source_type}`}><SourceIcon type={document.source_type} /></span>
+                <span className="nav-copy"><strong>{document.title}</strong><small>{formatDate(document.created_at)} · {document.word_count.toLocaleString()} words</small></span>
+                <ArrowRight className="nav-arrow" size={15} />
               </button>
             ))}
-            {!documents.length && <p className="empty-sidebar">Your documents will appear here.</p>}
+            {!filteredLibrary.length && <p className="empty-sidebar">No documents in this view.</p>}
           </nav>
         </aside>
 
@@ -402,144 +503,70 @@ export default function App() {
               {workspaceMode === "ask" && <span className={answerStatus?.available ? "model-ready" : "model-offline"}>{answerStatus?.available ? `${answerStatus.model} ready` : "Local model offline"}</span>}
             </div>
             <div className="search-control">
-              <input
-                id="search"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder={workspaceMode === "ask" ? "Ask a question answered from your documents" : "Try a phrase, topic, or exact term"}
-              />
-              {query && <button type="button" className="clear-button" onClick={() => { setQuery(""); setSearchMeta(null); setAnswer(null); }}>Clear</button>}
-              <button className="search-button" disabled={busy}>{busy ? (workspaceMode === "ask" ? "Thinking" : "Searching") : (workspaceMode === "ask" ? "Ask" : "Search")}</button>
+              <Search className="search-leading" size={19} />
+              <input ref={searchInput} id="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={workspaceMode === "ask" ? "Ask a question answered from your documents" : "Try a phrase, topic, or exact term"} />
+              {query && <button type="button" className="clear-button" title="Clear query" aria-label="Clear query" onClick={() => { setQuery(""); setSearchMeta(null); setAnswer(null); searchInput.current?.focus(); }}><X size={17} /></button>}
+              <button className="search-button" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : workspaceMode === "ask" ? <Sparkles size={17} /> : <Search size={17} />}<span>{busy ? "Working" : workspaceMode === "ask" ? "Ask" : "Search"}</span></button>
             </div>
             <div className={`search-options ${workspaceMode === "ask" ? "ask-options" : ""}`}>
-              {workspaceMode === "search" && (
-              <div className="mode-switch" aria-label="Search mode">
-                {["hybrid", "keyword", "semantic"].map((mode) => (
-                  <button
-                    type="button"
-                    key={mode}
-                    className={searchMode === mode ? "active" : ""}
-                    onClick={() => setSearchMode(mode)}
-                  >
-                    {mode}
-                  </button>
-                ))}
-              </div>
-              )}
+              {workspaceMode === "search" && <div className="mode-switch" aria-label="Search mode">{["hybrid", "keyword", "semantic"].map((mode) => <button type="button" key={mode} className={searchMode === mode ? "active" : ""} onClick={() => setSearchMode(mode)}>{mode}</button>)}</div>}
               <div className="embedding-state">
-                <span>
-                  {embeddingStatus?.ready
-                    ? `${embeddingStatus.indexed_chunks} passages indexed`
-                    : embeddingStatus?.total_chunks
-                      ? `${embeddingStatus.pending_chunks} passages need vectors`
-                      : "Add documents to enable semantic search"}
-                </span>
-                {!!embeddingStatus?.total_chunks && !embeddingStatus.ready && (
-                  <button type="button" onClick={enableSemanticSearch} disabled={indexing}>
-                    {indexing ? "Indexing locally..." : "Enable semantic search"}
-                  </button>
-                )}
+                {embeddingStatus?.ready ? <CheckCircle2 size={14} /> : <Sparkles size={14} />}
+                <span>{embeddingStatus?.ready ? `${embeddingStatus.indexed_chunks} passages indexed` : embeddingStatus?.total_chunks ? `${embeddingStatus.pending_chunks} passages need vectors` : "Add documents to enable semantic search"}</span>
+                {!!embeddingStatus?.total_chunks && !embeddingStatus.ready && <button type="button" onClick={enableSemanticSearch} disabled={indexing}>{indexing ? "Indexing locally" : "Enable semantic search"}</button>}
               </div>
             </div>
           </form>
 
-          {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")}>Dismiss</button></div>}
+          {!!ingestionJobs.length && showActivity && (
+            <section className="job-queue" aria-label="Import activity" aria-live="polite">
+              <div className="job-queue-heading"><div><Activity size={15} /><strong>Import activity</strong><span>{activeJobs} active</span></div><button className="icon-button" title="Hide activity" aria-label="Hide activity" onClick={() => setShowActivity(false)}><X size={16} /></button></div>
+              <div className="job-list">
+                {ingestionJobs.slice(0, 4).map((job) => (
+                  <div className={`job-row job-${job.status}`} key={job.id}>
+                    <span className={`source-icon source-${job.source_type}`}><SourceIcon type={job.source_type} /></span>
+                    <div className="job-copy"><div><strong>{job.title}</strong><span>{job.stage}</span></div><div className="job-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={job.progress}><span style={{ width: `${job.progress}%` }} /></div>{job.error && <small>{job.error}</small>}</div>
+                    <span className="job-status">{job.status}</span>
+                    {["queued", "running"].includes(job.status) && <button className="icon-button job-action" type="button" title="Cancel import" aria-label="Cancel import" onClick={() => updateIngestionJob(job, "cancel")}><Square size={14} /></button>}
+                    {["failed", "cancelled"].includes(job.status) && <button className="icon-button job-action" type="button" title="Retry import" aria-label="Retry import" onClick={() => updateIngestionJob(job, "retry")}><RefreshCw size={15} /></button>}
+                    {job.status === "completed" && <CheckCircle2 className="job-complete" size={17} />}
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" title="Dismiss" aria-label="Dismiss" onClick={() => setError("")}><X size={17} /></button></div>}
 
           {selected ? (
-            <article className="reader">
+            <article className="reader view-enter">
               <div className="reader-header">
-                <div>
-                  <button className="back-button" onClick={() => setSelected(null)}>Back to results</button>
-                  <h1>{selected.title}</h1>
-                  <p>
-                    {formatDate(selected.created_at)} / {selected.word_count.toLocaleString()} words / {selected.source_type}
-                    {selected.source_type === "pdf" ? ` / ${selected.page_count} pages` : ""}
-                    {selected.ocr_applied ? " / OCR" : ""}
-                    {selected.duration_seconds ? ` / ${formatTimestamp(selected.duration_seconds)}` : ""}
-                    {selected.language ? ` / ${selected.language.toUpperCase()}` : ""}
-                  </p>
-                </div>
-                <button className="danger-button" onClick={() => deleteDocument(selected)}>Delete</button>
+                <div><button className="back-button" onClick={() => setSelected(null)}><ArrowLeft size={15} />Back</button><div className="reader-title"><span className={`source-icon source-${selected.source_type}`}><SourceIcon type={selected.source_type} size={19} /></span><h1>{selected.title}</h1></div><p>{formatDate(selected.created_at)} · {selected.word_count.toLocaleString()} words · {selected.source_type}{selected.source_type === "pdf" ? ` · ${selected.page_count} pages` : ""}{selected.ocr_applied ? " · OCR" : ""}{selected.duration_seconds ? ` · ${formatTimestamp(selected.duration_seconds)}` : ""}{selected.language ? ` · ${selected.language.toUpperCase()}` : ""}</p></div>
+                <button className="icon-button danger-button" title="Delete document" aria-label="Delete document" onClick={() => deleteDocument(selected)}><Trash2 size={18} /></button>
               </div>
               <div className="speech-panel">
-                <button className="speech-button" onClick={() => speaking ? stopSpeaking() : speak(selected)}>
-                  {speaking ? "Stop reading" : busy ? "Preparing" : "Read aloud"}
-                </button>
-                <label>
-                  Voice
-                  <select value={voiceName} onChange={(event) => setVoiceName(event.target.value)}>
-                    {speechVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
-                  </select>
-                </label>
-                <label>
-                  Speed <output>{rate.toFixed(1)}x</output>
-                  <input type="range" min="0.6" max="1.6" step="0.1" value={rate} onChange={(event) => setRate(Number(event.target.value))} />
-                </label>
+                <button className={`speech-button ${speaking ? "active" : ""}`} onClick={() => speaking ? stopSpeaking() : speak(selected)}>{speaking ? <Square size={16} /> : busy ? <LoaderCircle className="spin" size={17} /> : <Volume2 size={18} />}<span>{speaking ? "Stop reading" : busy ? "Preparing" : "Read aloud"}</span></button>
+                <label>Voice<select value={voiceName} onChange={(event) => setVoiceName(event.target.value)}>{speechVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select></label>
+                <label>Speed <output>{rate.toFixed(1)}x</output><input type="range" min="0.6" max="1.6" step="0.1" value={rate} onChange={(event) => setRate(Number(event.target.value))} /></label>
               </div>
               <div className="document-content">{selected.content}</div>
             </article>
           ) : answer ? (
-            <section className="answer-view">
-              <div className="answer-header">
-                <p className="eyebrow">Grounded answer</p>
-                <h1>{answer.question}</h1>
-                <span>{answer.generated ? `Generated locally with ${answer.model}` : "Evidence mode"} / {answer.elapsed_ms} ms</span>
-              </div>
+            <section className="answer-view view-enter">
+              <div className="answer-header"><p className="eyebrow">Grounded answer</p><h1>{answer.question}</h1><span>{answer.generated ? `Generated locally with ${answer.model}` : "Evidence mode"} · {answer.elapsed_ms} ms</span></div>
               {answer.warning && <div className="search-warning">{answer.warning}</div>}
               <div className="answer-copy">{answer.answer}</div>
               <div className="evidence-heading"><h2>Sources</h2><span>{answer.citations.length} passages</span></div>
-              <div className="evidence-list">
-                {answer.citations.map((citation) => (
-                  <button key={`${citation.document_id}-${citation.number}`} className="evidence-row" onClick={() => openCitation(citation)}>
-                    <span className="citation-number">{citation.number}</span>
-                    <span className="evidence-copy">
-                      <strong>{citation.title}</strong>
-                      <small>{citation.source_type}{citation.page_number ? ` / Page ${citation.page_number}` : ""}{citation.start_seconds != null ? ` / ${formatTimestamp(citation.start_seconds)} - ${formatTimestamp(citation.end_seconds)}` : ""}</small>
-                      <span>{citation.passage}</span>
-                    </span>
-                  </button>
-                ))}
-              </div>
+              <div className="evidence-list">{answer.citations.map((citation) => <button key={`${citation.document_id}-${citation.number}`} className="evidence-row" onClick={() => openCitation(citation)}><span className="citation-number">{citation.number}</span><span className="evidence-copy"><strong>{citation.title}</strong><small>{citation.source_type}{citation.page_number ? ` · Page ${citation.page_number}` : ""}{citation.start_seconds != null ? ` · ${formatTimestamp(citation.start_seconds)} – ${formatTimestamp(citation.end_seconds)}` : ""}</small><span>{citation.passage}</span></span><ArrowRight size={17} /></button>)}</div>
             </section>
           ) : (
-            <section className="results-view">
-              <div className="results-heading">
-                <div>
-                  <p className="eyebrow">{searchMeta ? "Search results" : "Recent documents"}</p>
-                  <h1>{searchMeta ? `Matches for "${query.trim()}"` : "Your local knowledge base"}</h1>
-                </div>
-                {searchMeta && <span className="search-stats">{searchMeta.total} results in {searchMeta.elapsed} ms</span>}
-              </div>
-
+            <section className="results-view view-enter">
+              <div className="results-heading"><div><p className="eyebrow">{searchMeta ? "Search results" : "Recent documents"}</p><h1>{searchMeta ? `Matches for “${query.trim()}”` : "Your local knowledge base"}</h1></div>{searchMeta && <span className="search-stats">{searchMeta.total} results · {searchMeta.elapsed} ms</span>}</div>
               <div className="results-list">
                 {searchMeta?.warning && <div className="search-warning">{searchMeta.warning}</div>}
-                {visibleDocuments.map((document) => (
-                  <article className="result-row" key={document.id}>
-                    <button className="result-main" onClick={() => setSelected(document)}>
-                      <div className="result-meta">
-                        <span>{document.source_type}</span>
-                        <span>{formatDate(document.created_at)}</span>
-                        <span>{document.word_count.toLocaleString()} words</span>
-                        {document.page_number && <span>Page {document.page_number}</span>}
-                        {document.ocr_applied && <span>OCR</span>}
-                        {document.start_seconds != null && <span>{formatTimestamp(document.start_seconds)} - {formatTimestamp(document.end_seconds)}</span>}
-                      </div>
-                      <h2>{document.title}</h2>
-                      <p>{document.snippet ? <HighlightedSnippet value={document.snippet} /> : document.content.slice(0, 220)}</p>
-                    </button>
-                    <button className="read-quick" onClick={() => speak(document)}>Read</button>
-                  </article>
-                ))}
+                {visibleDocuments.map((document) => <article className="result-row" key={document.id}><span className={`source-icon source-${document.source_type}`}><SourceIcon type={document.source_type} size={19} /></span><button className="result-main" onClick={() => setSelected(document)}><div className="result-meta"><span>{document.source_type}</span><span>{formatDate(document.created_at)}</span><span>{document.word_count.toLocaleString()} words</span>{document.page_number && <span>Page {document.page_number}</span>}{document.ocr_applied && <span>OCR</span>}{document.start_seconds != null && <span>{formatTimestamp(document.start_seconds)} – {formatTimestamp(document.end_seconds)}</span>}</div><h2>{document.title}</h2><p>{document.snippet ? <HighlightedSnippet value={document.snippet} /> : document.content.slice(0, 220)}</p></button><button className="icon-button read-quick" title="Read aloud" aria-label={`Read ${document.title} aloud`} onClick={() => speak(document)}><Volume2 size={17} /></button><button className="icon-button open-result" title="Open document" aria-label={`Open ${document.title}`} onClick={() => setSelected(document)}><ArrowRight size={18} /></button></article>)}
               </div>
-
-              {!visibleDocuments.length && (
-                <div className="empty-state">
-                  <div className="empty-icon">N</div>
-                  <h2>{searchMeta ? "No matching passages" : workspaceMode === "ask" ? "Ask across your library" : "Build your local library"}</h2>
-                  <p>{searchMeta ? "Try fewer or more specific terms." : workspaceMode === "ask" ? "Your answer will stay grounded in indexed documents and show its sources." : "Add documents or media to make them searchable and readable aloud."}</p>
-                  {!searchMeta && <button className="primary-button" onClick={() => setShowImporter(true)}>Add first document</button>}
-                </div>
-              )}
+              {!visibleDocuments.length && <div className="empty-state"><div className="empty-icon">{searchMeta ? <Search size={27} /> : <BookOpen size={27} />}</div><h2>{searchMeta ? "No matching passages" : workspaceMode === "ask" ? "Ask across your library" : "Build your local library"}</h2><p>{searchMeta ? "Try fewer or more specific terms." : workspaceMode === "ask" ? "Your answer will stay grounded in indexed documents and show its sources." : "Add documents or media to make them searchable and readable aloud."}</p>{!searchMeta && <button className="primary-button" onClick={() => setShowImporter(true)}><Plus size={17} />Add first document</button>}</div>}
             </section>
           )}
         </section>
@@ -547,29 +574,12 @@ export default function App() {
 
       {showImporter && (
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowImporter(false); }}>
-          <form className="import-modal" onSubmit={saveDocument}>
-            <div className="modal-header">
-              <div><p className="eyebrow">Local ingestion</p><h2>Add a document</h2></div>
-              <button type="button" className="close-button" aria-label="Close" onClick={() => setShowImporter(false)}>Close</button>
-            </div>
-            <label className="file-drop">
-              <strong>Choose a document, image, audio, or video file</strong>
-              <span>The file stays on this machine.</span>
-              <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.mp3,.wav,.m4a,.flac,.ogg,.aac,.opus,.aif,.aiff,.mp4,.mov,.mkv,.webm,.m4v,.txt,.md,.markdown,application/pdf,image/*,audio/*,video/*,text/plain,text/markdown" onChange={importFile} />
-            </label>
-            <div className="field-row">
-              <label>Title<input required maxLength="240" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
-              <label>Format<select disabled={["pdf", "image", "audio", "video"].includes(form.source_type)} value={form.source_type} onChange={(event) => setForm({ ...form, source_type: event.target.value })}><option value="text">Plain text</option><option value="markdown">Markdown</option><option value="transcript">Transcript</option><option value="pdf">PDF</option><option value="image">Image OCR</option><option value="audio">Audio</option><option value="video">Video</option></select></label>
-            </div>
-            {["pdf", "image", "audio", "video"].includes(form.source_type) ? (
-              <div className="pdf-ready"><strong>{uploadFile?.name}</strong><span>{["audio", "video"].includes(form.source_type) ? "Ready for local transcription and timestamp indexing." : "Ready for local extraction, OCR, and indexing."}</span></div>
-            ) : (
-              <label>Content<textarea required value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="Paste text here, or choose a file above." /></label>
-            )}
-            <div className="modal-actions">
-              <button type="button" className="secondary-button" onClick={() => setShowImporter(false)}>Cancel</button>
-              <button className="primary-button" disabled={busy}>{busy ? (["audio", "video"].includes(form.source_type) ? "Transcribing" : "Indexing") : "Add and index"}</button>
-            </div>
+          <form className="import-modal view-enter" onSubmit={saveDocument}>
+            <div className="modal-header"><div><p className="eyebrow">Local ingestion</p><h2>Add a document</h2></div><button type="button" className="icon-button close-button" aria-label="Close" title="Close" onClick={() => setShowImporter(false)}><X size={19} /></button></div>
+            <label className={`file-drop ${uploadFile ? "has-file" : ""}`}><UploadCloud size={28} /><strong>{uploadFile ? uploadFile.name : "Choose a document, image, audio, or video"}</strong><span>{uploadFile ? `${(uploadFile.size / 1024 / 1024).toFixed(1)} MB · stored locally` : "Browse files from this machine"}</span><input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.mp3,.wav,.m4a,.flac,.ogg,.aac,.opus,.aif,.aiff,.mp4,.mov,.mkv,.webm,.m4v,.txt,.md,.markdown,application/pdf,image/*,audio/*,video/*,text/plain,text/markdown" onChange={importFile} /></label>
+            <div className="field-row"><label>Title<input required maxLength="240" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label><label>Format<select disabled={["pdf", "image", "audio", "video"].includes(form.source_type)} value={form.source_type} onChange={(event) => setForm({ ...form, source_type: event.target.value })}><option value="text">Plain text</option><option value="markdown">Markdown</option><option value="transcript">Transcript</option><option value="pdf">PDF</option><option value="image">Image OCR</option><option value="audio">Audio</option><option value="video">Video</option></select></label></div>
+            {["pdf", "image", "audio", "video"].includes(form.source_type) ? <div className="pdf-ready"><CheckCircle2 size={17} /><div><strong>{uploadFile?.name}</strong><span>{["audio", "video"].includes(form.source_type) ? "Ready for transcription and timestamp indexing." : "Ready for extraction, OCR, and indexing."}</span></div></div> : <label>Content<textarea required value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="Paste text here, or choose a file above." /></label>}
+            <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowImporter(false)}>Cancel</button><button className="primary-button" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <UploadCloud size={17} />}<span>{busy ? "Uploading" : ["pdf", "image", "audio", "video"].includes(form.source_type) ? "Add to queue" : "Add and index"}</span></button></div>
           </form>
         </div>
       )}

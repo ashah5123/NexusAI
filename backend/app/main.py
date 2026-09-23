@@ -10,7 +10,8 @@ from starlette.background import BackgroundTask
 
 from .embedding import EmbeddingService
 from .generation import OllamaAnswerService
-from .ingestion import IngestionError, MAX_UPLOAD_BYTES, extract_image, extract_pdf
+from .ingestion import MAX_UPLOAD_BYTES
+from .jobs import IngestionWorker
 from .models import (
     AnswerRequest,
     AnswerResponse,
@@ -20,6 +21,8 @@ from .models import (
     DocumentRead,
     EmbeddingStatus,
     HealthResponse,
+    IngestionJob,
+    IngestionJobList,
     ReindexResult,
     SearchResponse,
     SpeechRequest,
@@ -29,7 +32,7 @@ from .models import (
 from .repository import DocumentRepository
 from .ocr import OCRService
 from .speech import LocalSpeechService, SpeechError
-from .transcription import MAX_MEDIA_BYTES, TranscriptionError, TranscriptionService
+from .transcription import MAX_MEDIA_BYTES, TranscriptionService
 
 repository = DocumentRepository()
 embedding_service = EmbeddingService()
@@ -37,15 +40,22 @@ ocr_service = OCRService()
 transcription_service = TranscriptionService()
 answer_service = OllamaAnswerService()
 speech_service = LocalSpeechService()
+ingestion_worker = IngestionWorker(
+    repository, ocr_service, transcription_service, embedding_service
+)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     repository.initialize()
-    yield
+    ingestion_worker.start()
+    try:
+        yield
+    finally:
+        ingestion_worker.stop()
 
 
-app = FastAPI(title="NexusAI API", version="0.8.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.9.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,68 +80,50 @@ def create_document(payload: DocumentCreate) -> DocumentRead:
     return repository.create(payload)
 
 
-@app.post("/api/documents/pdf", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/documents/pdf",
+    response_model=IngestionJob,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def upload_pdf(
     data: Annotated[bytes, Body(media_type="application/pdf")],
     filename: Annotated[str, Query(min_length=1, max_length=500)],
     title: Annotated[str | None, Query(min_length=1, max_length=240)] = None,
-) -> DocumentRead:
+) -> IngestionJob:
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="PDF exceeds the 20 MB local upload limit")
-    try:
-        extraction = extract_pdf(data, ocr_service)
-    except IngestionError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    document_title = title or filename.rsplit(".", 1)[0]
-    content = "\n\n".join(text for _, text in extraction.pages)
-    payload = DocumentCreate(
-        title=document_title,
-        content=content,
-        source_type="pdf",
-        source_name=filename,
-    )
-    return repository.create(
-        payload,
-        pages=extraction.pages,
-        ocr_applied=extraction.ocr_pages > 0,
-        page_count=extraction.total_pages,
+    return ingestion_worker.submit(
+        data, title or filename.rsplit(".", 1)[0], "pdf", filename
     )
 
 
-@app.post("/api/documents/image", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/documents/image",
+    response_model=IngestionJob,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def upload_image(
     data: Annotated[bytes, Body(media_type="application/octet-stream")],
     filename: Annotated[str, Query(min_length=1, max_length=500)],
     title: Annotated[str | None, Query(min_length=1, max_length=240)] = None,
-) -> DocumentRead:
+) -> IngestionJob:
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Image exceeds the 20 MB local upload limit")
-    try:
-        extraction = extract_image(data, ocr_service)
-    except IngestionError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    document_title = title or filename.rsplit(".", 1)[0]
-    content = extraction.pages[0][1]
-    payload = DocumentCreate(
-        title=document_title,
-        content=content,
-        source_type="image",
-        source_name=filename,
-    )
-    return repository.create(
-        payload,
-        pages=extraction.pages,
-        ocr_applied=True,
-        page_count=extraction.total_pages,
+    return ingestion_worker.submit(
+        data, title or filename.rsplit(".", 1)[0], "image", filename
     )
 
 
-@app.post("/api/documents/media", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/documents/media",
+    response_model=IngestionJob,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def upload_media(
     data: Annotated[bytes, Body(media_type="application/octet-stream")],
     filename: Annotated[str, Query(min_length=1, max_length=500)],
     title: Annotated[str | None, Query(min_length=1, max_length=240)] = None,
-) -> DocumentRead:
+) -> IngestionJob:
     if len(data) > MAX_MEDIA_BYTES:
         raise HTTPException(status_code=413, detail="Media exceeds the 100 MB local limit")
     suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -141,25 +133,33 @@ def upload_media(
     }
     if suffix not in video_extensions | audio_extensions:
         raise HTTPException(status_code=422, detail="Unsupported audio or video format")
-    try:
-        transcription = transcription_service.transcribe(data, suffix)
-    except TranscriptionError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     source_type = "video" if suffix in video_extensions else "audio"
-    payload = DocumentCreate(
-        title=title or filename.rsplit(".", 1)[0],
-        content=transcription.text,
-        source_type=source_type,
-        source_name=filename,
+    return ingestion_worker.submit(
+        data, title or filename.rsplit(".", 1)[0], source_type, filename
     )
-    return repository.create(
-        payload,
-        timed_passages=[
-            (passage.start, passage.end, passage.text) for passage in transcription.passages
-        ],
-        duration_seconds=transcription.duration_seconds,
-        language=transcription.language,
-    )
+
+
+@app.get("/api/ingestion-jobs", response_model=IngestionJobList)
+def list_ingestion_jobs(
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> IngestionJobList:
+    return repository.list_ingestion_jobs(limit)
+
+
+@app.post("/api/ingestion-jobs/{job_id}/cancel", response_model=IngestionJob)
+def cancel_ingestion_job(job_id: str) -> IngestionJob:
+    job = ingestion_worker.cancel(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Import job not found")
+    return job
+
+
+@app.post("/api/ingestion-jobs/{job_id}/retry", response_model=IngestionJob)
+def retry_ingestion_job(job_id: str) -> IngestionJob:
+    job = ingestion_worker.retry(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Import job or source file not found")
+    return job
 
 
 @app.get("/api/documents", response_model=DocumentList)

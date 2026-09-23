@@ -3,9 +3,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
+from typing import Callable
 
 MAX_MEDIA_BYTES = 100 * 1024 * 1024
 MAX_MEDIA_DURATION_SECONDS = 2 * 60 * 60
@@ -71,19 +73,25 @@ class TranscriptionService:
     def model_name(self) -> str:
         return WHISPER_MODEL
 
-    def transcribe(self, data: bytes, suffix: str) -> TranscriptionResult:
+    def transcribe(
+        self,
+        data: bytes,
+        suffix: str,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> TranscriptionResult:
         if not data:
             raise TranscriptionError("The uploaded media file is empty")
         if len(data) > MAX_MEDIA_BYTES:
             raise TranscriptionError("Media exceeds the 100 MB local transcription limit")
 
         temporary_path = None
+        process: subprocess.Popen[str] | None = None
         try:
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
                 temporary.write(data)
                 temporary_path = temporary.name
             with self._transcribe_lock:
-                completed = subprocess.run(
+                process = subprocess.Popen(
                     [
                         sys.executable,
                         "-m",
@@ -92,22 +100,42 @@ class TranscriptionService:
                         WHISPER_MODEL,
                         str(WHISPER_CACHE),
                     ],
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=7200,
-                    check=False,
                 )
-        except subprocess.TimeoutExpired as exc:
-            raise TranscriptionError("Local transcription exceeded the two-hour processing limit") from exc
+                started = time.monotonic()
+                while True:
+                    if should_cancel and should_cancel():
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                        raise TranscriptionError("Transcription cancelled")
+                    if time.monotonic() - started > 7200:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                        raise TranscriptionError(
+                            "Local transcription exceeded the two-hour processing limit"
+                        )
+                    try:
+                        stdout, _ = process.communicate(timeout=0.5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
         finally:
             if temporary_path:
                 Path(temporary_path).unlink(missing_ok=True)
 
         try:
-            payload = json.loads(completed.stdout)
+            payload = json.loads(stdout)
         except (json.JSONDecodeError, UnboundLocalError) as exc:
             raise TranscriptionError("The local transcription worker failed") from exc
-        if completed.returncode != 0:
+        if process.returncode != 0:
             raise TranscriptionError(payload.get("error", "The media file could not be transcribed"))
         passages = [TimedPassage(**item) for item in payload["passages"]]
         return TranscriptionResult(

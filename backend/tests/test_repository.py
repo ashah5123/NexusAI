@@ -11,8 +11,10 @@ import pymupdf
 from PIL import Image, ImageDraw
 
 from app.models import DocumentCreate
+from app.embedding import EmbeddingService
 from app.generation import OllamaAnswerService
 from app.ingestion import IngestionError, extract_image, extract_pdf
+from app.jobs import IngestionWorker
 from app.ocr import OCRService
 from app.repository import CHUNK_OVERLAP, CHUNK_WORDS, DocumentRepository, split_chunks
 from app.speech import LocalSpeechService, SpeechError
@@ -213,6 +215,18 @@ class DocumentRepositoryTest(unittest.TestCase):
 
         self.assertFalse(service.loaded)
 
+    def test_transcription_cancellation_terminates_worker_process(self) -> None:
+        service = TranscriptionService()
+        process = SimpleNamespace(
+            terminate=lambda: None,
+            wait=lambda timeout: 0,
+            kill=lambda: None,
+        )
+
+        with patch("app.transcription.subprocess.Popen", return_value=process):
+            with self.assertRaisesRegex(TranscriptionError, "cancelled"):
+                service.transcribe(b"media", ".wav", should_cancel=lambda: True)
+
     def test_speech_service_reports_unavailable_without_say(self) -> None:
         with patch("app.speech.which", return_value=None):
             service = LocalSpeechService()
@@ -231,6 +245,63 @@ class DocumentRepositoryTest(unittest.TestCase):
             service = LocalSpeechService()
 
             self.assertEqual(service.voices(), ["Alex", "Samantha"])
+
+    def test_background_image_ingestion_completes_and_creates_document(self) -> None:
+        ocr = OCRService()
+        ocr._engine = FakeOCREngine()
+        worker = IngestionWorker(
+            self.repository,
+            ocr,
+            TranscriptionService(),
+            EmbeddingService(),
+            Path(self.temp_dir.name) / "uploads",
+        )
+
+        queued = worker.submit(
+            image_bytes(), "Scanned invoice", "image", "invoice.png"
+        )
+
+        self.assertEqual(queued.status, "queued")
+        self.assertTrue(worker.process_next())
+        completed = self.repository.get_ingestion_job(queued.id)
+        document = self.repository.get(queued.id)
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(completed.progress, 100)
+        self.assertEqual(completed.document_id, queued.id)
+        self.assertEqual(document.title, "Scanned invoice")
+        self.assertTrue(document.ocr_applied)
+
+    def test_ingestion_job_can_be_cancelled_and_retried(self) -> None:
+        ocr = OCRService()
+        ocr._engine = FakeOCREngine()
+        worker = IngestionWorker(
+            self.repository,
+            ocr,
+            TranscriptionService(),
+            EmbeddingService(),
+            Path(self.temp_dir.name) / "uploads",
+        )
+        queued = worker.submit(image_bytes(), "Receipt", "image", "receipt.png")
+
+        cancelled = worker.cancel(queued.id)
+        self.assertEqual(cancelled.status, "cancelled")
+        retried = worker.retry(queued.id)
+        self.assertEqual(retried.status, "queued")
+        self.assertTrue(worker.process_next())
+        self.assertEqual(self.repository.get_ingestion_job(queued.id).status, "completed")
+
+    def test_interrupted_ingestion_jobs_return_to_queue(self) -> None:
+        input_path = Path(self.temp_dir.name) / "source.png"
+        input_path.write_bytes(image_bytes())
+        job = self.repository.create_ingestion_job(
+            "job-1", "Recovered scan", "image", "scan.png", input_path
+        )
+
+        claimed = self.repository.claim_next_ingestion_job()
+        self.assertEqual(claimed.id, job.id)
+        self.assertEqual(claimed.status, "running")
+        self.assertEqual(self.repository.reset_interrupted_ingestion_jobs(), 1)
+        self.assertEqual(self.repository.get_ingestion_job(job.id).status, "queued")
 
 
 if __name__ == "__main__":

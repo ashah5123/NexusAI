@@ -34,6 +34,7 @@ services:
       NEXUSAI_SEMANTIC_MIN_SCORE: ${NEXUSAI_SEMANTIC_MIN_SCORE:-0.55}
       NEXUSAI_WHISPER_MODEL: ${NEXUSAI_WHISPER_MODEL:-base}
       NEXUSAI_WHISPER_CACHE: /app/data/models/whisper
+      NEXUSAI_UPLOAD_DIR: /app/data/uploads
     volumes:
       - nexusai-data:/app/data
 

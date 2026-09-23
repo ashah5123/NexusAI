@@ -11,7 +11,16 @@ from uuid import uuid4
 
 import numpy as np
 
-from .models import DocumentCreate, DocumentList, DocumentRead, EmbeddingStatus, SearchHit, SearchResponse
+from .models import (
+    DocumentCreate,
+    DocumentList,
+    DocumentRead,
+    EmbeddingStatus,
+    IngestionJob,
+    IngestionJobList,
+    SearchHit,
+    SearchResponse,
+)
 
 DB_PATH = Path(os.getenv("NEXUSAI_DB_PATH", "./data/nexusai.db"))
 TOKEN_RE = re.compile(r"[\w'-]+", re.UNICODE)
@@ -82,6 +91,25 @@ class DocumentRepository:
                     embedding_model TEXT,
                     UNIQUE(document_id, chunk_index)
                 );
+
+                CREATE TABLE IF NOT EXISTS ingestion_jobs (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_name TEXT NOT NULL,
+                    input_path TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    stage TEXT NOT NULL DEFAULT 'Waiting',
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS ingestion_jobs_status_created
+                ON ingestion_jobs(status, created_at);
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
                     title, content, content='chunks', content_rowid='id',
@@ -193,9 +221,10 @@ class DocumentRepository:
         timed_passages: list[tuple[float, float, str]] | None = None,
         duration_seconds: float | None = None,
         language: str | None = None,
+        document_id: str | None = None,
     ) -> DocumentRead:
         now = datetime.now(UTC).isoformat()
-        document_id = str(uuid4())
+        document_id = document_id or str(uuid4())
         resolved_page_count = page_count or (len(pages) if pages else 1)
         if timed_passages:
             sections = [(None, start, end, text) for start, end, text in timed_passages]
@@ -230,6 +259,143 @@ class DocumentRepository:
         if document is None:
             raise RuntimeError("Document was not persisted")
         return document
+
+    @staticmethod
+    def _ingestion_job(row: sqlite3.Row) -> IngestionJob:
+        fields = IngestionJob.model_fields
+        return IngestionJob(**{key: row[key] for key in fields})
+
+    def create_ingestion_job(
+        self,
+        job_id: str,
+        title: str,
+        source_type: str,
+        source_name: str,
+        input_path: Path,
+    ) -> IngestionJob:
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """INSERT INTO ingestion_jobs
+                (id, title, source_type, source_name, input_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, title, source_type, source_name, str(input_path), now, now),
+            )
+            connection.commit()
+        job = self.get_ingestion_job(job_id)
+        if job is None:
+            raise RuntimeError("Ingestion job was not persisted")
+        return job
+
+    def get_ingestion_job(self, job_id: str) -> IngestionJob | None:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM ingestion_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return self._ingestion_job(row) if row else None
+
+    def ingestion_job_input_path(self, job_id: str) -> Path | None:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT input_path FROM ingestion_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return Path(row["input_path"]) if row else None
+
+    def list_ingestion_jobs(self, limit: int = 20) -> IngestionJobList:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM ingestion_jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+            total = connection.execute("SELECT COUNT(*) FROM ingestion_jobs").fetchone()[0]
+        return IngestionJobList(items=[self._ingestion_job(row) for row in rows], total=total)
+
+    def claim_next_ingestion_job(self) -> IngestionJob | None:
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT id FROM ingestion_jobs
+                WHERE status = 'queued' ORDER BY created_at LIMIT 1"""
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            cursor = connection.execute(
+                """UPDATE ingestion_jobs
+                SET status = 'running', stage = 'Starting', progress = 5,
+                    cancel_requested = 0, updated_at = ?
+                WHERE id = ? AND status = 'queued'""",
+                (now, row["id"]),
+            )
+            claimed = connection.execute(
+                "SELECT * FROM ingestion_jobs WHERE id = ?", (row["id"],)
+            ).fetchone()
+            connection.commit()
+        return self._ingestion_job(claimed) if cursor.rowcount and claimed else None
+
+    def update_ingestion_job(self, job_id: str, **changes) -> IngestionJob | None:
+        allowed = {"status", "stage", "progress", "error", "document_id", "cancel_requested"}
+        updates = {key: value for key, value in changes.items() if key in allowed}
+        if not updates:
+            return self.get_ingestion_job(job_id)
+        updates["updated_at"] = datetime.now(UTC).isoformat()
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        with closing(self.connect()) as connection:
+            connection.execute(
+                f"UPDATE ingestion_jobs SET {assignments} WHERE id = ?",
+                (*updates.values(), job_id),
+            )
+            connection.commit()
+        return self.get_ingestion_job(job_id)
+
+    def cancel_ingestion_job(self, job_id: str) -> IngestionJob | None:
+        job = self.get_ingestion_job(job_id)
+        if job is None:
+            return None
+        if job.status == "queued":
+            return self.update_ingestion_job(
+                job_id, status="cancelled", stage="Cancelled", cancel_requested=1
+            )
+        if job.status == "running":
+            return self.update_ingestion_job(
+                job_id, stage="Cancelling", cancel_requested=1
+            )
+        return job
+
+    def retry_ingestion_job(self, job_id: str) -> IngestionJob | None:
+        job = self.get_ingestion_job(job_id)
+        if job is None:
+            return None
+        if job.status not in {"failed", "cancelled"}:
+            return job
+        return self.update_ingestion_job(
+            job_id,
+            status="queued",
+            stage="Waiting",
+            progress=0,
+            error=None,
+            document_id=None,
+            cancel_requested=0,
+        )
+
+    def reset_interrupted_ingestion_jobs(self) -> int:
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            cancelled = connection.execute(
+                """UPDATE ingestion_jobs
+                SET status = 'cancelled', stage = 'Cancelled', progress = 0, updated_at = ?
+                WHERE status = 'running' AND cancel_requested = 1""",
+                (now,),
+            ).rowcount
+            cursor = connection.execute(
+                """UPDATE ingestion_jobs
+                SET status = 'queued', stage = 'Recovered after restart', progress = 0,
+                    cancel_requested = 0, updated_at = ?
+                WHERE status = 'running' AND cancel_requested = 0""",
+                (now,),
+            )
+            connection.commit()
+        return cursor.rowcount + cancelled
 
     def get(self, document_id: str) -> DocumentRead | None:
         with closing(self.connect()) as connection:
