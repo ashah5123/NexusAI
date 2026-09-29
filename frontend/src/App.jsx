@@ -7,6 +7,7 @@ import {
   BookOpen,
   CheckCircle2,
   CheckSquare,
+  Copy,
   FileAudio,
   FileImage,
   FileText,
@@ -21,6 +22,7 @@ import {
   MessageSquareText,
   Pencil,
   Plus,
+  Printer,
   RefreshCw,
   ScanText,
   Search,
@@ -129,6 +131,7 @@ export default function App() {
   const [conversations, setConversations] = useState([]);
   const [activeConversationId, setActiveConversationId] = useState("");
   const [conversationMessages, setConversationMessages] = useState([]);
+  const [reportCopied, setReportCopied] = useState(false);
   const [askCollection, setAskCollection] = useState("all");
   const [askSourceType, setAskSourceType] = useState("all");
   const [results, setResults] = useState([]);
@@ -844,6 +847,34 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
 
+  function reportStem() {
+    const title = conversations.find((conversation) => conversation.id === activeConversationId)?.title || "research-report";
+    return title.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "research-report";
+  }
+
+  async function downloadConversationReport(format) {
+    if (!activeConversationId) return;
+    try {
+      const blob = await apiBlob(`/api/conversations/${activeConversationId}/report?format=${format}`);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${reportStem()}.${format === "json" ? "json" : "md"}`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) { setError(err.message); }
+  }
+
+  async function copyConversationReport() {
+    if (!activeConversationId) return;
+    try {
+      const blob = await apiBlob(`/api/conversations/${activeConversationId}/report?format=markdown`);
+      await navigator.clipboard.writeText(await blob.text());
+      setReportCopied(true);
+      window.setTimeout(() => setReportCopied(false), 1800);
+    } catch (err) { setError(`Could not copy report. ${err.message}`); }
+  }
+
   function editMetadata(document) {
     setMetadataForm({
       title: document.title,
@@ -1176,6 +1207,7 @@ export default function App() {
           ) : answer ? (
             <section className="answer-view view-enter">
               <div className="answer-header"><p className="eyebrow">Grounded conversation</p><h1>{conversations.find((conversation) => conversation.id === activeConversationId)?.title || answer.question}</h1><span>{conversationMessages.filter((message) => message.role === "user").length || 1} question(s) · follow-ups use recent thread context</span></div>
+              {activeConversationId && <div className="report-actions" aria-label="Research report actions"><span>Research report</span><button type="button" onClick={copyConversationReport}><Copy size={14} />{reportCopied ? "Copied" : "Copy"}</button><button type="button" onClick={() => downloadConversationReport("markdown")}><Download size={14} />Markdown</button><button type="button" onClick={() => downloadConversationReport("json")}><Download size={14} />JSON</button><button type="button" onClick={() => window.print()}><Printer size={14} />Print</button></div>}
               {conversationMessages.length ? <div className="conversation-thread">{conversationMessages.map((message) => message.role === "user" ? (
                 <article className="conversation-question" key={message.id}><span>You</span><p>{message.content}</p></article>
               ) : (

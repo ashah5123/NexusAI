@@ -159,12 +159,21 @@ class DocumentApiTest(unittest.TestCase):
         )
         detail_response = self.client.get(f"/api/conversations/{conversation_id}")
         list_response = self.client.get("/api/conversations")
+        markdown_response = self.client.get(
+            f"/api/conversations/{conversation_id}/report?format=markdown"
+        )
+        json_response = self.client.get(
+            f"/api/conversations/{conversation_id}/report?format=json"
+        )
         delete_response = self.client.delete(f"/api/conversations/{conversation_id}")
 
         self.assertEqual(create_response.status_code, 201)
         self.assertEqual(rename_response.json()["title"], "Launch plan")
         self.assertEqual(detail_response.json()["messages"], [])
         self.assertEqual(list_response.json()["total"], 1)
+        self.assertIn("# Launch plan", markdown_response.text)
+        self.assertIn("launch-plan.md", markdown_response.headers["content-disposition"])
+        self.assertEqual(json_response.json()["format"], "nexusai-research-report-v1")
         self.assertEqual(delete_response.status_code, 204)
 
 

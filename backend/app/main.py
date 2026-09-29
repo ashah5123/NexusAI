@@ -1,5 +1,6 @@
 """NexusAI API for local document ingestion and retrieval."""
 
+import json
 import mimetypes
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
@@ -53,6 +54,7 @@ from .models import (
     TranscriptionStatus,
 )
 from .repository import DocumentRepository
+from .reports import build_json_report, build_markdown_report, report_filename
 from .ocr import OCRService
 from .speech import LocalSpeechService, SpeechError
 from .transcription import MAX_MEDIA_BYTES, TranscriptionService
@@ -78,7 +80,7 @@ async def lifespan(_: FastAPI):
         ingestion_worker.stop()
 
 
-app = FastAPI(title="NexusAI API", version="0.15.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.16.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -405,6 +407,29 @@ def get_conversation(conversation_id: str) -> ConversationDetail:
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conversation
+
+
+@app.get("/api/conversations/{conversation_id}/report")
+def export_conversation_report(
+    conversation_id: str,
+    format: Annotated[Literal["markdown", "json"], Query()] = "markdown",
+) -> Response:
+    detail = repository.get_conversation_detail(conversation_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if format == "json":
+        content = json.dumps(build_json_report(detail), ensure_ascii=False, indent=2)
+        filename = report_filename(detail.conversation.title, "json")
+        media_type = "application/json"
+    else:
+        content = build_markdown_report(detail)
+        filename = report_filename(detail.conversation.title, "md")
+        media_type = "text/markdown"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.patch("/api/conversations/{conversation_id}", response_model=ConversationRead)

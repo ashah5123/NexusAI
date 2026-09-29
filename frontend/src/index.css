@@ -248,6 +248,10 @@ mark { border-radius: 2px; padding: 1px 2px; color: #292114; background: #f7d788
 .answer-header { padding-bottom: 24px; border-bottom: 1px solid #cfd7d2; }
 .answer-header h1 { max-width: 790px; font-size: 32px; }
 .answer-header > span { display: block; margin-top: 12px; color: #71807a; font-size: 10px; }
+.report-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin: 16px 0 0; border: 1px solid #ccd9d3; border-radius: 6px; padding: 8px 10px; background: #f1f6f3; }
+.report-actions > span { margin-right: auto; color: #53665d; font-size: 9px; font-weight: 900; text-transform: uppercase; }
+.report-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 29px; border: 1px solid #bdcbc4; border-radius: 4px; padding: 0 8px; color: #3f594e; background: #fff; font-size: 9px; font-weight: 850; text-transform: uppercase; }
+.report-actions button:hover { border-color: #82a899; color: #11664f; }
 .answer-view .search-warning { margin-top: 18px; border: 1px solid #d8c997; }
 .answer-copy { max-width: 800px; margin: 28px 0 34px; border-left: 4px solid #167d62; padding: 2px 0 2px 20px; white-space: pre-wrap; color: #24322d; font: 18px/1.75 Georgia, "Times New Roman", serif; }
 .conversation-thread { display: grid; gap: 28px; padding-top: 28px; }
@@ -312,6 +316,17 @@ mark { border-radius: 2px; padding: 1px 2px; color: #292114; background: #f7d788
 @keyframes view-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes citation-pulse { from { box-shadow: 0 0 0 8px rgba(163,74,45,0.2); } to { box-shadow: 0 0 0 0 rgba(163,74,45,0); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+
+@media print {
+  .topbar, .sidebar, .search-bar, .conversation-bar, .job-queue, .report-actions, .error-banner { display: none !important; }
+  .workspace { display: block; }
+  .content-area { background: #fff; }
+  .answer-view { max-width: none; padding: 0; }
+  .answer-header { margin-bottom: 24px; }
+  .conversation-question { color: #17201d; border: 1px solid #aebbb5; background: #fff; }
+  .conversation-question span { color: #56665f; }
+  .evidence-row { break-inside: avoid; }
+}
 
 @media (max-width: 840px) {
   .topbar { gap: 8px; padding: 0 12px; }

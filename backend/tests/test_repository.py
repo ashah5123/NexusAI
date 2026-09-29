@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 from app.models import (
     AnswerResponse,
     BulkDocumentUpdate,
+    Citation,
     ConversationCreate,
     ConversationUpdate,
     DocumentCreate,
@@ -30,6 +31,7 @@ from app.ingestion import IngestionError, extract_image, extract_pdf
 from app.jobs import IngestionWorker
 from app.ocr import OCRService
 from app.repository import CHUNK_OVERLAP, CHUNK_WORDS, DocumentRepository, split_chunks
+from app.reports import build_json_report, build_markdown_report, report_filename
 from app.speech import LocalSpeechService, SpeechError
 from app.transcription import TranscriptionError, TranscriptionService, group_segments
 
@@ -223,7 +225,12 @@ class DocumentRepositoryTest(unittest.TestCase):
             ConversationCreate(title="Atlas ownership")
         )
         answer = AnswerResponse(
-            question="Who owns Atlas?", answer="Maya owns Atlas [1].", citations=[],
+            question="Who owns Atlas?", answer="Maya owns Atlas [1].", citations=[Citation(
+                number=1, document_id="doc-1", title="Atlas memo", source_type="pdf",
+                page_number=2, start_seconds=None, end_seconds=None,
+                passage="Maya owns the Atlas launch.", chunk_index=0, score=0.9,
+                start_offset=0, end_offset=28,
+            )],
             model="test", generated=True, elapsed_ms=2, grounded=True,
             scope_description="All documents", conversation_id=conversation.id,
         )
@@ -238,6 +245,14 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertEqual(len(detail.messages), 2)
         self.assertEqual(detail.messages[0].role, "user")
         self.assertEqual(detail.messages[1].content, "Maya owns Atlas [1].")
+        self.assertEqual(detail.messages[1].citations[0].page_number, 2)
+        markdown = build_markdown_report(detail)
+        portable = build_json_report(detail)
+        self.assertIn("# Atlas ownership", markdown)
+        self.assertIn("## Evidence register", markdown)
+        self.assertIn("Atlas memo", markdown)
+        self.assertEqual(len(portable["evidence_register"]), 1)
+        self.assertEqual(report_filename("Atlas: Ownership?", "md"), "atlas-ownership.md")
         self.assertEqual(len(self.repository.recent_conversation_messages(conversation.id)), 2)
         self.assertEqual(renamed.title, "Atlas launch")
         self.assertTrue(self.repository.delete_conversation(conversation.id))
