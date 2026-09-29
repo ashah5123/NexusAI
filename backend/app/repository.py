@@ -14,6 +14,8 @@ import numpy as np
 
 from .models import (
     DocumentCreate,
+    BulkDocumentUpdate,
+    BulkUpdateResult,
     DocumentList,
     DocumentNoteCreate,
     DocumentNoteList,
@@ -30,6 +32,10 @@ from .models import (
     IngestionJobList,
     SearchHit,
     SearchResponse,
+    SavedViewCreate,
+    SavedViewList,
+    SavedViewRead,
+    SavedViewUpdate,
 )
 
 DB_PATH = Path(os.getenv("NEXUSAI_DB_PATH", "./data/nexusai.db"))
@@ -152,6 +158,20 @@ class DocumentRepository:
 
                 CREATE INDEX IF NOT EXISTS document_highlights_document_position
                 ON document_highlights(document_id, start_offset, end_offset);
+
+                CREATE TABLE IF NOT EXISTS saved_views (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    query TEXT NOT NULL DEFAULT '',
+                    collection_name TEXT,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    source_types_json TEXT NOT NULL DEFAULT '[]',
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    date_range TEXT NOT NULL DEFAULT 'all',
+                    sort_mode TEXT NOT NULL DEFAULT 'recent',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
                     title, content, content='chunks', content_rowid='id',
@@ -542,6 +562,101 @@ class DocumentRepository:
                 )
             connection.commit()
         return self.get(document_id)
+
+    def bulk_update(self, payload: BulkDocumentUpdate) -> BulkUpdateResult:
+        fields = payload.model_fields_set
+        assignments: list[str] = []
+        params: list[object] = []
+        if "collection" in fields:
+            assignments.append("collection_name = ?")
+            params.append(payload.collection)
+        if "tags" in fields:
+            assignments.append("tags_json = ?")
+            params.append(json.dumps(payload.tags))
+        if "favorite" in fields:
+            assignments.append("favorite = ?")
+            params.append(payload.favorite)
+        if not assignments:
+            return BulkUpdateResult(updated=0)
+        assignments.append("updated_at = ?")
+        params.append(datetime.now(UTC).isoformat())
+        placeholders = ",".join("?" for _ in payload.document_ids)
+        params.extend(payload.document_ids)
+        with closing(self.connect()) as connection:
+            cursor = connection.execute(
+                f"UPDATE documents SET {', '.join(assignments)} WHERE id IN ({placeholders})",
+                params,
+            )
+            connection.commit()
+        return BulkUpdateResult(updated=cursor.rowcount)
+
+    def rename_collection(self, old_name: str, new_name: str) -> int:
+        with closing(self.connect()) as connection:
+            cursor = connection.execute(
+                "UPDATE documents SET collection_name = ?, updated_at = ? WHERE collection_name = ?",
+                (new_name, datetime.now(UTC).isoformat(), old_name),
+            )
+            connection.commit()
+        return cursor.rowcount
+
+    def clear_collection(self, name: str) -> int:
+        with closing(self.connect()) as connection:
+            cursor = connection.execute(
+                "UPDATE documents SET collection_name = NULL, updated_at = ? WHERE collection_name = ?",
+                (datetime.now(UTC).isoformat(), name),
+            )
+            connection.commit()
+        return cursor.rowcount
+
+    @staticmethod
+    def _saved_view(row: sqlite3.Row) -> SavedViewRead:
+        return SavedViewRead(
+            id=row["id"], name=row["name"], query=row["query"],
+            collection=row["collection_name"], tags=json.loads(row["tags_json"]),
+            source_types=json.loads(row["source_types_json"]), favorite=bool(row["favorite"]),
+            date_range=row["date_range"], sort=row["sort_mode"],
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    def list_saved_views(self) -> SavedViewList:
+        with closing(self.connect()) as connection:
+            rows = connection.execute("SELECT * FROM saved_views ORDER BY name COLLATE NOCASE").fetchall()
+        return SavedViewList(items=[self._saved_view(row) for row in rows], total=len(rows))
+
+    def create_saved_view(self, payload: SavedViewCreate) -> SavedViewRead:
+        view_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """INSERT INTO saved_views
+                (id, name, query, collection_name, tags_json, source_types_json, favorite, date_range, sort_mode, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (view_id, payload.name, payload.query, payload.collection, json.dumps(payload.tags),
+                 json.dumps(payload.source_types), payload.favorite, payload.date_range, payload.sort, now, now),
+            )
+            connection.commit()
+            row = connection.execute("SELECT * FROM saved_views WHERE id = ?", (view_id,)).fetchone()
+        return self._saved_view(row)
+
+    def update_saved_view(self, view_id: str, payload: SavedViewUpdate) -> SavedViewRead | None:
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            cursor = connection.execute(
+                """UPDATE saved_views SET name = ?, query = ?, collection_name = ?, tags_json = ?,
+                source_types_json = ?, favorite = ?, date_range = ?, sort_mode = ?, updated_at = ?
+                WHERE id = ?""",
+                (payload.name, payload.query, payload.collection, json.dumps(payload.tags),
+                 json.dumps(payload.source_types), payload.favorite, payload.date_range, payload.sort, now, view_id),
+            )
+            connection.commit()
+            row = connection.execute("SELECT * FROM saved_views WHERE id = ?", (view_id,)).fetchone()
+        return self._saved_view(row) if cursor.rowcount and row else None
+
+    def delete_saved_view(self, view_id: str) -> bool:
+        with closing(self.connect()) as connection:
+            cursor = connection.execute("DELETE FROM saved_views WHERE id = ?", (view_id,))
+            connection.commit()
+        return cursor.rowcount > 0
 
     def list(self, limit: int, offset: int) -> DocumentList:
         with closing(self.connect()) as connection:

@@ -11,12 +11,15 @@ import pymupdf
 from PIL import Image, ImageDraw
 
 from app.models import (
+    BulkDocumentUpdate,
     DocumentCreate,
     DocumentHighlightCreate,
     DocumentHighlightUpdate,
     DocumentNoteCreate,
     DocumentNoteUpdate,
     DocumentUpdate,
+    SavedViewCreate,
+    SavedViewUpdate,
 )
 from app.embedding import EmbeddingService
 from app.generation import OllamaAnswerService
@@ -178,6 +181,39 @@ class DocumentRepositoryTest(unittest.TestCase):
             self.repository.search("Published", 10, "keyword", FakeEmbedder()).items[0].id,
             document.id,
         )
+
+    def test_bulk_organization_and_collection_management(self) -> None:
+        first = self.repository.create(DocumentCreate(title="First", content="First source"))
+        second = self.repository.create(DocumentCreate(title="Second", content="Second source"))
+
+        result = self.repository.bulk_update(BulkDocumentUpdate(
+            document_ids=[first.id, second.id], collection="Research", tags=["Review"], favorite=True
+        ))
+        renamed = self.repository.rename_collection("Research", "Evidence")
+
+        self.assertEqual(result.updated, 2)
+        self.assertEqual(renamed, 2)
+        self.assertEqual(self.repository.get(first.id).collection, "Evidence")
+        self.assertEqual(self.repository.get(second.id).tags, ["Review"])
+        self.assertTrue(self.repository.get(second.id).favorite)
+        self.assertEqual(self.repository.clear_collection("Evidence"), 2)
+        self.assertIsNone(self.repository.get(first.id).collection)
+
+    def test_saved_views_are_persisted_updated_and_deleted(self) -> None:
+        created = self.repository.create_saved_view(SavedViewCreate(
+            name="Recent research", query="atlas", collection="Research",
+            tags=["Review"], source_types=["pdf"], favorite=True, date_range="30d", sort="title",
+        ))
+        updated = self.repository.update_saved_view(created.id, SavedViewUpdate(
+            name="Atlas research", query="atlas", collection="Research",
+            tags=["Review"], source_types=["pdf"], favorite=True, date_range="7d", sort="recent",
+        ))
+
+        self.assertEqual(self.repository.list_saved_views().total, 1)
+        self.assertEqual(updated.name, "Atlas research")
+        self.assertEqual(updated.date_range, "7d")
+        self.assertTrue(self.repository.delete_saved_view(created.id))
+        self.assertEqual(self.repository.list_saved_views().total, 0)
 
     def test_document_notes_can_be_created_updated_and_deleted(self) -> None:
         document = self.repository.create(

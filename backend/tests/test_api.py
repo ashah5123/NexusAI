@@ -131,6 +131,24 @@ class DocumentApiTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
 
+    def test_smart_view_and_bulk_organization_endpoints(self) -> None:
+        first = self.repository.create(DocumentCreate(title="First", content="First source"))
+        second = self.repository.create(DocumentCreate(title="Second", content="Second source"))
+        bulk_response = self.client.patch("/api/documents", json={
+            "document_ids": [first.id, second.id], "collection": "Research", "tags": ["Review"]
+        })
+        view_response = self.client.post("/api/saved-views", json={
+            "name": "Research review", "collection": "Research", "tags": ["Review"]
+        })
+        list_response = self.client.get("/api/saved-views")
+        rename_response = self.client.patch("/api/collections/Research", json={"name": "Evidence"})
+
+        self.assertEqual(bulk_response.json(), {"updated": 2})
+        self.assertEqual(view_response.status_code, 201)
+        self.assertEqual(list_response.json()["total"], 1)
+        self.assertEqual(rename_response.json(), {"updated": 2})
+        self.assertEqual(self.repository.get(first.id).collection, "Evidence")
+
 
 if __name__ == "__main__":
     unittest.main()

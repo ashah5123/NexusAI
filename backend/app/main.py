@@ -17,6 +17,8 @@ from .models import (
     AnswerRequest,
     AnswerResponse,
     AnswerStatus,
+    BulkDocumentUpdate,
+    BulkUpdateResult,
     CleanupResult,
     DocumentCreate,
     DocumentList,
@@ -30,12 +32,17 @@ from .models import (
     DocumentHighlightUpdate,
     DocumentRead,
     DocumentUpdate,
+    CollectionRename,
     EmbeddingStatus,
     HealthResponse,
     IngestionJob,
     IngestionJobList,
     ReindexResult,
     SearchResponse,
+    SavedViewCreate,
+    SavedViewList,
+    SavedViewRead,
+    SavedViewUpdate,
     SpeechRequest,
     SpeechStatus,
     TranscriptionStatus,
@@ -66,12 +73,12 @@ async def lifespan(_: FastAPI):
         ingestion_worker.stop()
 
 
-app = FastAPI(title="NexusAI API", version="0.13.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.14.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -203,6 +210,46 @@ def update_document(document_id: str, payload: DocumentUpdate) -> DocumentRead:
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
+
+
+@app.patch("/api/documents", response_model=BulkUpdateResult)
+def bulk_update_documents(payload: BulkDocumentUpdate) -> BulkUpdateResult:
+    return repository.bulk_update(payload)
+
+
+@app.patch("/api/collections/{collection_name}", response_model=BulkUpdateResult)
+def rename_collection(collection_name: str, payload: CollectionRename) -> BulkUpdateResult:
+    return BulkUpdateResult(updated=repository.rename_collection(collection_name, payload.name))
+
+
+@app.delete("/api/collections/{collection_name}", response_model=BulkUpdateResult)
+def clear_collection(collection_name: str) -> BulkUpdateResult:
+    return BulkUpdateResult(updated=repository.clear_collection(collection_name))
+
+
+@app.get("/api/saved-views", response_model=SavedViewList)
+def list_saved_views() -> SavedViewList:
+    return repository.list_saved_views()
+
+
+@app.post("/api/saved-views", response_model=SavedViewRead, status_code=status.HTTP_201_CREATED)
+def create_saved_view(payload: SavedViewCreate) -> SavedViewRead:
+    return repository.create_saved_view(payload)
+
+
+@app.put("/api/saved-views/{view_id}", response_model=SavedViewRead)
+def update_saved_view(view_id: str, payload: SavedViewUpdate) -> SavedViewRead:
+    view = repository.update_saved_view(view_id, payload)
+    if view is None:
+        raise HTTPException(status_code=404, detail="Saved view not found")
+    return view
+
+
+@app.delete("/api/saved-views/{view_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_saved_view(view_id: str) -> Response:
+    if not repository.delete_saved_view(view_id):
+        raise HTTPException(status_code=404, detail="Saved view not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/api/documents/{document_id}/source")

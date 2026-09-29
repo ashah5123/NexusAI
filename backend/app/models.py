@@ -87,6 +87,93 @@ class DocumentList(BaseModel):
     total: int
 
 
+class BulkDocumentUpdate(BaseModel):
+    document_ids: list[str] = Field(min_length=1, max_length=100)
+    collection: str | None = Field(default=None, max_length=120)
+    tags: list[str] | None = Field(default=None, max_length=12)
+    favorite: bool | None = None
+
+    @field_validator("document_ids")
+    @classmethod
+    def unique_document_ids(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
+
+    @field_validator("collection")
+    @classmethod
+    def normalize_collection(cls, value: str | None) -> str | None:
+        return value.strip() or None if value else None
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, value: list[str] | None) -> list[str] | None:
+        return DocumentUpdate.normalize_tags(value)
+
+
+class BulkUpdateResult(BaseModel):
+    updated: int
+
+
+class CollectionRename(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class SavedViewCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    query: str = Field(default="", max_length=300)
+    collection: str | None = Field(default=None, max_length=120)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+    source_types: list[Literal["text", "markdown", "pdf", "image", "audio", "video", "transcript"]] = Field(default_factory=list, max_length=7)
+    favorite: bool = False
+    date_range: Literal["all", "7d", "30d", "year"] = "all"
+    sort: Literal["recent", "title", "favorite"] = "recent"
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("collection")
+    @classmethod
+    def normalize_collection(cls, value: str | None) -> str | None:
+        return value.strip() or None if value else None
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, value: list[str]) -> list[str]:
+        return DocumentUpdate.normalize_tags(value) or []
+
+
+class SavedViewUpdate(SavedViewCreate):
+    pass
+
+
+class SavedViewRead(SavedViewCreate):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SavedViewList(BaseModel):
+    items: list[SavedViewRead]
+    total: int
+
+
 class DocumentNoteCreate(BaseModel):
     content: str = Field(min_length=1, max_length=10_000)
 
@@ -230,7 +317,7 @@ class AnswerRequest(BaseModel):
     document_ids: list[str] = Field(default_factory=list, max_length=100)
     collection: str | None = Field(default=None, max_length=120)
     source_types: list[Literal["text", "markdown", "pdf", "image", "audio", "video", "transcript"]] = Field(
-        default_factory=list, max_length=6
+        default_factory=list, max_length=7
     )
 
     @field_validator("question")

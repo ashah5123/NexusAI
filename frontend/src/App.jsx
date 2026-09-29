@@ -3,8 +3,10 @@ import {
   Activity,
   ArrowLeft,
   ArrowRight,
+  Bookmark,
   BookOpen,
   CheckCircle2,
+  CheckSquare,
   FileAudio,
   FileImage,
   FileText,
@@ -144,12 +146,19 @@ export default function App() {
   const [ingestionJobs, setIngestionJobs] = useState([]);
   const [showActivity, setShowActivity] = useState(true);
   const [libraryFilter, setLibraryFilter] = useState("all");
+  const [favoriteOnly, setFavoriteOnly] = useState(false);
   const [mobileLibraryOpen, setMobileLibraryOpen] = useState(false);
   const [sourceLocation, setSourceLocation] = useState({ page: null, start: null, end: null });
   const [showMetadata, setShowMetadata] = useState(false);
   const [metadataForm, setMetadataForm] = useState({ title: "", collection: "", tags: "" });
   const [sortMode, setSortMode] = useState("recent");
   const [collectionFilter, setCollectionFilter] = useState("all");
+  const [tagFilters, setTagFilters] = useState([]);
+  const [dateFilter, setDateFilter] = useState("all");
+  const [savedViews, setSavedViews] = useState([]);
+  const [activeViewId, setActiveViewId] = useState("");
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState([]);
   const [notes, setNotes] = useState([]);
   const [noteDraft, setNoteDraft] = useState("");
   const [editingNoteId, setEditingNoteId] = useState(null);
@@ -179,6 +188,11 @@ export default function App() {
     setIngestionJobs(data.items);
   }, []);
 
+  const loadSavedViews = useCallback(async () => {
+    const data = await api("/api/saved-views");
+    setSavedViews(data.items);
+  }, []);
+
   const loadNotes = useCallback(async (documentId) => {
     const data = await api(`/api/documents/${documentId}/notes`);
     if (activeNotesDocument.current === documentId) setNotes(data.items);
@@ -196,9 +210,31 @@ export default function App() {
     loadDocuments().catch((err) => setError(err.message));
     loadEmbeddingStatus().catch((err) => setError(err.message));
     loadIngestionJobs().catch((err) => setError(err.message));
+    loadSavedViews().catch((err) => setError(err.message));
     api("/api/answers/status").then(setAnswerStatus).catch(() => setAnswerStatus(null));
     api("/api/speech/status").then(setSpeechStatus).catch(() => setSpeechStatus(null));
-  }, [loadDocuments, loadEmbeddingStatus, loadIngestionJobs]);
+  }, [loadDocuments, loadEmbeddingStatus, loadIngestionJobs, loadSavedViews]);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("nexusai-library-filters");
+    if (!saved) return;
+    try {
+      const filters = JSON.parse(saved);
+      setLibraryFilter(filters.source || "all");
+      setFavoriteOnly(Boolean(filters.favorite));
+      setCollectionFilter(filters.collection || "all");
+      setTagFilters(Array.isArray(filters.tags) ? filters.tags : []);
+      setDateFilter(filters.date || "all");
+      setSortMode(filters.sort || "recent");
+    } catch { /* Ignore stale local preferences. */ }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("nexusai-library-filters", JSON.stringify({
+      source: libraryFilter, favorite: favoriteOnly, collection: collectionFilter,
+      tags: tagFilters, date: dateFilter, sort: sortMode,
+    }));
+  }, [libraryFilter, favoriteOnly, collectionFilter, tagFilters, dateFilter, sortMode]);
 
   useEffect(() => {
     if (!ingestionJobs.some((job) => ["queued", "running"].includes(job.status))) return undefined;
@@ -258,16 +294,22 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  const visibleDocuments = searchMeta ? results : documents;
   const selectedVoice = useMemo(() => voices.find((voice) => voice.name === voiceName), [voices, voiceName]);
   const speechVoices = speechStatus?.available && speechStatus.voices?.length ? speechStatus.voices : voices.map((voice) => voice.name);
   const activeJobs = ingestionJobs.filter((job) => ["queued", "running"].includes(job.status)).length;
   const sourceUrl = selected ? `${API_BASE_URL}/api/documents/${selected.id}/source` : "";
   const collections = useMemo(() => [...new Set(documents.map((document) => document.collection).filter(Boolean))].sort(), [documents]);
+  const allTags = useMemo(() => [...new Set(documents.flatMap((document) => document.tags))].sort(), [documents]);
   const filteredLibrary = useMemo(() => {
     const filtered = documents.filter((document) => {
       if (collectionFilter !== "all" && document.collection !== collectionFilter) return false;
-      if (libraryFilter === "favorite") return document.favorite;
+      if (favoriteOnly && !document.favorite) return false;
+      if (tagFilters.some((tag) => !document.tags.includes(tag))) return false;
+      if (dateFilter !== "all") {
+        const age = Date.now() - new Date(document.updated_at).getTime();
+        const days = dateFilter === "7d" ? 7 : dateFilter === "30d" ? 30 : 365;
+        if (age > days * 86_400_000) return false;
+      }
       if (libraryFilter === "text") return ["text", "markdown", "transcript"].includes(document.source_type);
       if (libraryFilter === "scan") return ["pdf", "image"].includes(document.source_type);
       if (libraryFilter === "media") return ["audio", "video"].includes(document.source_type);
@@ -278,7 +320,8 @@ export default function App() {
       if (sortMode === "favorite") return Number(right.favorite) - Number(left.favorite) || left.title.localeCompare(right.title);
       return new Date(right.updated_at) - new Date(left.updated_at);
     });
-  }, [documents, libraryFilter, collectionFilter, sortMode]);
+  }, [documents, libraryFilter, favoriteOnly, collectionFilter, tagFilters, dateFilter, sortMode]);
+  const visibleDocuments = searchMeta ? results : filteredLibrary;
   const readerHighlights = useMemo(() => {
     if (!citationFocus) return highlights;
     const focus = {
@@ -483,6 +526,101 @@ export default function App() {
     setResults((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item));
     setSelected((current) => current?.id === updated.id ? updated : current);
     return updated;
+  }
+
+  function sourceTypesForFilter(filter) {
+    if (filter === "text") return ["text", "markdown", "transcript"];
+    if (filter === "scan") return ["pdf", "image"];
+    if (filter === "media") return ["audio", "video"];
+    return [];
+  }
+
+  function filterForSourceTypes(sourceTypes) {
+    const key = [...sourceTypes].sort().join(",");
+    if (key === "markdown,text,transcript") return "text";
+    if (key === "image,pdf") return "scan";
+    if (key === "audio,video") return "media";
+    return "all";
+  }
+
+  async function saveCurrentView() {
+    const name = window.prompt("Name this smart view");
+    if (!name?.trim()) return;
+    try {
+      const created = await api("/api/saved-views", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name, query: query.trim(), collection: collectionFilter === "all" ? null : collectionFilter,
+          tags: tagFilters, source_types: sourceTypesForFilter(libraryFilter), favorite: favoriteOnly,
+          date_range: dateFilter, sort: sortMode,
+        }),
+      });
+      setSavedViews((current) => [...current, created].sort((a, b) => a.name.localeCompare(b.name)));
+      setActiveViewId(created.id);
+    } catch (err) { setError(err.message); }
+  }
+
+  function applySavedView(viewId) {
+    setActiveViewId(viewId);
+    const view = savedViews.find((item) => item.id === viewId);
+    if (!view) return;
+    setQuery(view.query);
+    setCollectionFilter(view.collection || "all");
+    setTagFilters(view.tags);
+    setLibraryFilter(filterForSourceTypes(view.source_types));
+    setFavoriteOnly(view.favorite);
+    setDateFilter(view.date_range);
+    setSortMode(view.sort);
+    setSearchMeta(null);
+    setAnswer(null);
+  }
+
+  async function removeSavedView() {
+    if (!activeViewId || !window.confirm("Delete this saved view?")) return;
+    try {
+      await api(`/api/saved-views/${activeViewId}`, { method: "DELETE" });
+      setSavedViews((current) => current.filter((view) => view.id !== activeViewId));
+      setActiveViewId("");
+    } catch (err) { setError(err.message); }
+  }
+
+  async function organizeSelected() {
+    if (!selectedDocumentIds.length) return;
+    const collection = window.prompt("Move selected documents to collection (leave blank to remove collection)", "");
+    if (collection === null) return;
+    const tags = window.prompt("Replace tags (comma separated; leave blank for none)", "");
+    if (tags === null) return;
+    try {
+      await api("/api/documents", {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_ids: selectedDocumentIds, collection, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean) }),
+      });
+      setSelectedDocumentIds([]);
+      setBulkMode(false);
+      await loadDocuments();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function renameCurrentCollection() {
+    if (collectionFilter === "all") return;
+    const name = window.prompt("Rename collection", collectionFilter);
+    if (!name?.trim() || name.trim() === collectionFilter) return;
+    try {
+      await api(`/api/collections/${encodeURIComponent(collectionFilter)}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+      });
+      setCollectionFilter(name.trim());
+      await loadDocuments();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function clearCurrentCollection() {
+    if (collectionFilter === "all" || !window.confirm(`Remove collection “${collectionFilter}” from its documents?`)) return;
+    try {
+      await api(`/api/collections/${encodeURIComponent(collectionFilter)}`, { method: "DELETE" });
+      setCollectionFilter("all");
+      await loadDocuments();
+    } catch (err) { setError(err.message); }
   }
 
   async function toggleFavorite(document) {
@@ -818,20 +956,36 @@ export default function App() {
               ["scan", "PDF and images", ScanText],
               ["media", "Audio and video", Headphones],
             ].map(([value, label, Icon]) => (
-              <button key={value} className={libraryFilter === value ? "active" : ""} title={label} aria-label={label} onClick={() => setLibraryFilter(value)}><Icon size={16} /></button>
+              <button key={value} className={(value === "favorite" ? favoriteOnly : libraryFilter === value) ? "active" : ""} title={label} aria-label={label} onClick={() => value === "favorite" ? setFavoriteOnly((current) => !current) : setLibraryFilter(value)}><Icon size={16} /></button>
             ))}
+          </div>
+          <div className="saved-view-controls">
+            <label><Bookmark size={14} /><select aria-label="Saved smart view" value={activeViewId} onChange={(event) => applySavedView(event.target.value)}><option value="">Smart views</option>{savedViews.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}</select></label>
+            <button title="Save current filters" aria-label="Save current filters" onClick={saveCurrentView}><Plus size={14} /></button>
+            {activeViewId && <button title="Delete saved view" aria-label="Delete saved view" onClick={removeSavedView}><Trash2 size={13} /></button>}
           </div>
           <div className="library-controls">
             <label><Folder size={14} /><select aria-label="Filter by collection" value={collectionFilter} onChange={(event) => setCollectionFilter(event.target.value)}><option value="all">All collections</option>{collections.map((collection) => <option key={collection} value={collection}>{collection}</option>)}</select></label>
             <select aria-label="Sort library" value={sortMode} onChange={(event) => setSortMode(event.target.value)}><option value="recent">Recent</option><option value="title">Title</option><option value="favorite">Favorites</option></select>
+            <label><Tags size={14} /><select aria-label="Add tag filter" value="" onChange={(event) => event.target.value && setTagFilters((current) => current.includes(event.target.value) ? current : [...current, event.target.value])}><option value="">Add tag</option>{allTags.filter((tag) => !tagFilters.includes(tag)).map((tag) => <option key={tag} value={tag}>{tag}</option>)}</select></label>
+            <select aria-label="Filter by date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)}><option value="all">Any date</option><option value="7d">7 days</option><option value="30d">30 days</option><option value="year">1 year</option></select>
           </div>
+          {!!tagFilters.length && <div className="tag-filter-list">{tagFilters.map((tag) => <button key={tag} onClick={() => setTagFilters((current) => current.filter((item) => item !== tag))}>{tag}<X size={11} /></button>)}</div>}
+          <div className="organize-actions">
+            {collectionFilter !== "all" && <><button onClick={renameCurrentCollection}><Pencil size={12} />Rename</button><button onClick={clearCurrentCollection}><Trash2 size={12} />Remove</button></>}
+            <button className={bulkMode ? "active" : ""} onClick={() => { setBulkMode((current) => !current); setSelectedDocumentIds([]); }}><CheckSquare size={12} />{bulkMode ? "Done" : "Select"}</button>
+          </div>
+          {bulkMode && <div className="bulk-bar"><button onClick={() => setSelectedDocumentIds(filteredLibrary.map((document) => document.id))}>Select all</button><span>{selectedDocumentIds.length} selected</span><button className="bulk-apply" disabled={!selectedDocumentIds.length} onClick={organizeSelected}>Organize</button></div>}
           <nav className="document-nav" aria-label="Document library">
             {filteredLibrary.map((document) => (
-              <button className={selected?.id === document.id ? "nav-item active" : "nav-item"} key={document.id} onClick={() => openDocument(document)}>
-                <span className={`source-icon source-${document.source_type}`}><SourceIcon type={document.source_type} /></span>
-                <span className="nav-copy"><strong>{document.favorite && <Star className="favorite-inline" size={11} fill="currentColor" />}{document.title}</strong><small>{document.collection || formatDate(document.created_at)} · {document.word_count.toLocaleString()} words</small></span>
-                <ArrowRight className="nav-arrow" size={15} />
-              </button>
+              <div className="nav-select-row" key={document.id}>
+                {bulkMode && <input type="checkbox" aria-label={`Select ${document.title}`} checked={selectedDocumentIds.includes(document.id)} onChange={() => setSelectedDocumentIds((current) => current.includes(document.id) ? current.filter((id) => id !== document.id) : [...current, document.id])} />}
+                <button className={selected?.id === document.id ? "nav-item active" : "nav-item"} onClick={() => openDocument(document)}>
+                  <span className={`source-icon source-${document.source_type}`}><SourceIcon type={document.source_type} /></span>
+                  <span className="nav-copy"><strong>{document.favorite && <Star className="favorite-inline" size={11} fill="currentColor" />}{document.title}</strong><small>{document.collection || formatDate(document.created_at)} · {document.word_count.toLocaleString()} words</small></span>
+                  <ArrowRight className="nav-arrow" size={15} />
+                </button>
+              </div>
             ))}
             {!filteredLibrary.length && <p className="empty-sidebar">No documents in this view.</p>}
           </nav>
