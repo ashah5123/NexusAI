@@ -101,6 +101,36 @@ class DocumentApiTest(unittest.TestCase):
         self.assertEqual(list_response.json()["total"], 1)
         self.assertEqual(delete_response.status_code, 204)
 
+    def test_document_highlight_endpoints(self) -> None:
+        content = "Evidence worth annotating."
+        document = self.repository.create(DocumentCreate(title="Research source", content=content))
+        create_response = self.client.post(
+            f"/api/documents/{document.id}/highlights",
+            json={"start_offset": 0, "end_offset": 8, "selected_text": "Evidence", "color": "blue", "annotation": "Important"},
+        )
+        highlight_id = create_response.json()["id"]
+        update_response = self.client.patch(
+            f"/api/documents/{document.id}/highlights/{highlight_id}",
+            json={"color": "pink", "annotation": "Review this"},
+        )
+        list_response = self.client.get(f"/api/documents/{document.id}/highlights")
+        delete_response = self.client.delete(
+            f"/api/documents/{document.id}/highlights/{highlight_id}"
+        )
+
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(update_response.json()["color"], "pink")
+        self.assertEqual(list_response.json()["total"], 1)
+        self.assertEqual(delete_response.status_code, 204)
+
+    def test_highlight_rejects_stale_anchor(self) -> None:
+        document = self.repository.create(DocumentCreate(title="Research", content="Evidence"))
+        response = self.client.post(
+            f"/api/documents/{document.id}/highlights",
+            json={"start_offset": 0, "end_offset": 8, "selected_text": "Different"},
+        )
+        self.assertEqual(response.status_code, 422)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,7 @@ exact wording or semantic meaning; inspect ranked snippets with source citations
 document or transcript aloud with local speech synthesis. Long-running OCR and transcription jobs
 show progress, survive restarts, and can be cancelled or retried. Original sources open in the
 reader at cited pages or timestamps, while collections, tags, favorites, and sorting keep the
-library manageable. Reader notes let you capture local takeaways and follow-ups beside each source.
+library manageable. Reader notes and anchored highlights capture takeaways beside exact passages.
 
 ## Stack
 

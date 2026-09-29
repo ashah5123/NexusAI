@@ -10,7 +10,14 @@ import numpy as np
 import pymupdf
 from PIL import Image, ImageDraw
 
-from app.models import DocumentCreate, DocumentNoteCreate, DocumentNoteUpdate, DocumentUpdate
+from app.models import (
+    DocumentCreate,
+    DocumentHighlightCreate,
+    DocumentHighlightUpdate,
+    DocumentNoteCreate,
+    DocumentNoteUpdate,
+    DocumentUpdate,
+)
 from app.embedding import EmbeddingService
 from app.generation import OllamaAnswerService
 from app.ingestion import IngestionError, extract_image, extract_pdf
@@ -170,6 +177,50 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertTrue(self.repository.delete(document.id))
 
         self.assertIsNone(self.repository.list_notes(document.id))
+
+    def test_document_highlights_are_anchored_updated_and_deleted(self) -> None:
+        content = "The launch decision is documented here."
+        document = self.repository.create(DocumentCreate(title="Launch memo", content=content))
+        start = content.index("launch decision")
+        end = start + len("launch decision")
+
+        created = self.repository.create_highlight(
+            document.id,
+            DocumentHighlightCreate(
+                start_offset=start,
+                end_offset=end,
+                selected_text="launch decision",
+                color="yellow",
+                annotation="Key decision",
+            ),
+        )
+        updated = self.repository.update_highlight(
+            document.id,
+            created.id,
+            DocumentHighlightUpdate(color="green", annotation="Confirmed decision"),
+        )
+
+        self.assertEqual(self.repository.list_highlights(document.id).total, 1)
+        self.assertEqual(updated.color, "green")
+        self.assertEqual(updated.annotation, "Confirmed decision")
+        self.assertTrue(self.repository.delete_highlight(document.id, created.id))
+
+    def test_highlight_rejects_mismatched_text_and_overlap(self) -> None:
+        document = self.repository.create(DocumentCreate(title="Memo", content="abcdef"))
+        self.repository.create_highlight(
+            document.id,
+            DocumentHighlightCreate(start_offset=1, end_offset=3, selected_text="bc"),
+        )
+        with self.assertRaises(ValueError):
+            self.repository.create_highlight(
+                document.id,
+                DocumentHighlightCreate(start_offset=2, end_offset=4, selected_text="cd"),
+            )
+        with self.assertRaises(ValueError):
+            self.repository.create_highlight(
+                document.id,
+                DocumentHighlightCreate(start_offset=3, end_offset=5, selected_text="wrong"),
+            )
 
     def test_chunking_has_bounded_size_and_overlap(self) -> None:
         words = [f"word{index}" for index in range(CHUNK_WORDS + 20)]

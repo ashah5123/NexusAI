@@ -19,6 +19,10 @@ from .models import (
     DocumentNoteList,
     DocumentNoteRead,
     DocumentNoteUpdate,
+    DocumentHighlightCreate,
+    DocumentHighlightList,
+    DocumentHighlightRead,
+    DocumentHighlightUpdate,
     DocumentRead,
     DocumentUpdate,
     EmbeddingStatus,
@@ -131,6 +135,23 @@ class DocumentRepository:
 
                 CREATE INDEX IF NOT EXISTS document_notes_document_updated
                 ON document_notes(document_id, updated_at);
+
+                CREATE TABLE IF NOT EXISTS document_highlights (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    start_offset INTEGER NOT NULL,
+                    end_offset INTEGER NOT NULL,
+                    selected_text TEXT NOT NULL,
+                    color TEXT NOT NULL,
+                    annotation TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK(start_offset >= 0 AND end_offset > start_offset),
+                    CHECK(color IN ('yellow', 'green', 'blue', 'pink'))
+                );
+
+                CREATE INDEX IF NOT EXISTS document_highlights_document_position
+                ON document_highlights(document_id, start_offset, end_offset);
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
                     title, content, content='chunks', content_rowid='id',
@@ -276,6 +297,12 @@ class DocumentRepository:
     @staticmethod
     def _note(row: sqlite3.Row) -> DocumentNoteRead:
         return DocumentNoteRead(**{key: row[key] for key in DocumentNoteRead.model_fields})
+
+    @staticmethod
+    def _highlight(row: sqlite3.Row) -> DocumentHighlightRead:
+        return DocumentHighlightRead(
+            **{key: row[key] for key in DocumentHighlightRead.model_fields}
+        )
 
     def create(
         self,
@@ -588,6 +615,85 @@ class DocumentRepository:
             cursor = connection.execute(
                 "DELETE FROM document_notes WHERE id = ? AND document_id = ?",
                 (note_id, document_id),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def list_highlights(self, document_id: str) -> DocumentHighlightList | None:
+        if self.get(document_id) is None:
+            return None
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """SELECT * FROM document_highlights WHERE document_id = ?
+                ORDER BY start_offset ASC, created_at ASC""",
+                (document_id,),
+            ).fetchall()
+        return DocumentHighlightList(
+            items=[self._highlight(row) for row in rows], total=len(rows)
+        )
+
+    def create_highlight(
+        self, document_id: str, payload: DocumentHighlightCreate
+    ) -> DocumentHighlightRead | None:
+        document = self.get(document_id)
+        if document is None:
+            return None
+        if payload.end_offset > len(document.content):
+            raise ValueError("highlight offsets exceed document length")
+        actual = document.content[payload.start_offset : payload.end_offset]
+        if actual != payload.selected_text:
+            raise ValueError("selected text does not match document offsets")
+        highlight_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            overlap = connection.execute(
+                """SELECT 1 FROM document_highlights
+                WHERE document_id = ? AND start_offset < ? AND end_offset > ? LIMIT 1""",
+                (document_id, payload.end_offset, payload.start_offset),
+            ).fetchone()
+            if overlap:
+                raise ValueError("highlight overlaps an existing highlight")
+            connection.execute(
+                """INSERT INTO document_highlights
+                (id, document_id, start_offset, end_offset, selected_text, color, annotation,
+                 created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (highlight_id, document_id, payload.start_offset, payload.end_offset,
+                 payload.selected_text, payload.color, payload.annotation, now, now),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM document_highlights WHERE id = ?", (highlight_id,)
+            ).fetchone()
+        return self._highlight(row)
+
+    def update_highlight(
+        self, document_id: str, highlight_id: str, payload: DocumentHighlightUpdate
+    ) -> DocumentHighlightRead | None:
+        with closing(self.connect()) as connection:
+            existing = connection.execute(
+                "SELECT * FROM document_highlights WHERE id = ? AND document_id = ?",
+                (highlight_id, document_id),
+            ).fetchone()
+            if existing is None:
+                return None
+            color = payload.color or existing["color"]
+            now = datetime.now(UTC).isoformat()
+            connection.execute(
+                """UPDATE document_highlights SET color = ?, annotation = ?, updated_at = ?
+                WHERE id = ? AND document_id = ?""",
+                (color, payload.annotation, now, highlight_id, document_id),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM document_highlights WHERE id = ?", (highlight_id,)
+            ).fetchone()
+        return self._highlight(row)
+
+    def delete_highlight(self, document_id: str, highlight_id: str) -> bool:
+        with closing(self.connect()) as connection:
+            cursor = connection.execute(
+                "DELETE FROM document_highlights WHERE id = ? AND document_id = ?",
+                (highlight_id, document_id),
             )
             connection.commit()
         return cursor.rowcount > 0
