@@ -30,6 +30,7 @@ class OllamaAnswerService:
         passages: list[dict],
         warning: str | None = None,
         scope_description: str = "All documents",
+        history: list[dict] | None = None,
     ) -> AnswerResponse:
         started = time.perf_counter()
         citations = []
@@ -82,6 +83,7 @@ class OllamaAnswerService:
                         "does not answer the question, say so plainly. Do not use outside knowledge."
                     ),
                 },
+                *(history or []),
                 {"role": "user", "content": f"Question: {question}\n\nEvidence:\n{context}"},
             ],
             "options": {"temperature": 0.1, "num_ctx": 8192},

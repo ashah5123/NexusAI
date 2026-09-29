@@ -149,6 +149,24 @@ class DocumentApiTest(unittest.TestCase):
         self.assertEqual(rename_response.json(), {"updated": 2})
         self.assertEqual(self.repository.get(first.id).collection, "Evidence")
 
+    def test_conversation_endpoints(self) -> None:
+        create_response = self.client.post(
+            "/api/conversations", json={"title": "Launch research"}
+        )
+        conversation_id = create_response.json()["id"]
+        rename_response = self.client.patch(
+            f"/api/conversations/{conversation_id}", json={"title": "Launch plan"}
+        )
+        detail_response = self.client.get(f"/api/conversations/{conversation_id}")
+        list_response = self.client.get("/api/conversations")
+        delete_response = self.client.delete(f"/api/conversations/{conversation_id}")
+
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(rename_response.json()["title"], "Launch plan")
+        self.assertEqual(detail_response.json()["messages"], [])
+        self.assertEqual(list_response.json()["total"], 1)
+        self.assertEqual(delete_response.status_code, 204)
+
 
 if __name__ == "__main__":
     unittest.main()

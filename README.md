@@ -2,7 +2,7 @@
 
 Local-first document search and text-to-speech, sized for a 16 GB Apple Silicon Mac.
 
-Phase 13 provides a local multimodal knowledge base with source-aware reading and organization: import PDFs, scanned
+Phase 14 provides a local multimodal knowledge base with source-aware reading and organization: import PDFs, scanned
 documents, images, audio, video, text, and Markdown; search page-aware or timestamped passages by
 exact wording or semantic meaning; inspect ranked snippets with source citations; and read any
 document or transcript aloud with local speech synthesis. Long-running OCR and transcription jobs
@@ -13,6 +13,8 @@ Library questions can be scoped by collection or source type, and model answers 
 when every cited evidence number can be verified against the retrieved passages. Smart views save
 combined collection, tag, source, favorite, date, query, and sort filters. Collections can be renamed
 or removed without deleting documents, and bulk organization updates selected sources together.
+Grounded conversations persist locally, retain verified citations, and use recent questions to resolve
+follow-ups. Conversation threads can be reopened, renamed, or deleted from the Ask workspace.
 
 ## Stack
 
@@ -84,7 +86,7 @@ docker compose up --build
 ```
 
 The default profile starts only the API and frontend. The reserved PostgreSQL/pgvector service can
-be inspected with `docker compose --profile production-data up`, but Phase 13 does not depend on it.
+be inspected with `docker compose --profile production-data up`, but Phase 14 does not depend on it.
 
 ## Verify
 

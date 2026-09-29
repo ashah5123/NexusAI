@@ -14,8 +14,16 @@ import numpy as np
 
 from .models import (
     DocumentCreate,
+    AnswerResponse,
     BulkDocumentUpdate,
     BulkUpdateResult,
+    Citation,
+    ConversationCreate,
+    ConversationDetail,
+    ConversationList,
+    ConversationMessageRead,
+    ConversationRead,
+    ConversationUpdate,
     DocumentList,
     DocumentNoteCreate,
     DocumentNoteList,
@@ -172,6 +180,30 @@ class DocumentRepository:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    citations_json TEXT NOT NULL DEFAULT '[]',
+                    generated INTEGER NOT NULL DEFAULT 0,
+                    grounded INTEGER NOT NULL DEFAULT 0,
+                    scope_description TEXT NOT NULL DEFAULT 'All documents',
+                    warning TEXT,
+                    created_at TEXT NOT NULL,
+                    CHECK(role IN ('user', 'assistant'))
+                );
+
+                CREATE INDEX IF NOT EXISTS conversation_messages_thread_created
+                ON conversation_messages(conversation_id, created_at);
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
                     title, content, content='chunks', content_rowid='id',
@@ -657,6 +689,125 @@ class DocumentRepository:
             cursor = connection.execute("DELETE FROM saved_views WHERE id = ?", (view_id,))
             connection.commit()
         return cursor.rowcount > 0
+
+    @staticmethod
+    def _conversation(row: sqlite3.Row) -> ConversationRead:
+        return ConversationRead(
+            id=row["id"], title=row["title"],
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _conversation_message(row: sqlite3.Row) -> ConversationMessageRead:
+        return ConversationMessageRead(
+            id=row["id"], conversation_id=row["conversation_id"], role=row["role"],
+            content=row["content"],
+            citations=[Citation(**item) for item in json.loads(row["citations_json"] or "[]")],
+            generated=bool(row["generated"]), grounded=bool(row["grounded"]),
+            scope_description=row["scope_description"], warning=row["warning"],
+            created_at=row["created_at"],
+        )
+
+    def create_conversation(self, payload: ConversationCreate) -> ConversationRead:
+        conversation_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            connection.execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (conversation_id, payload.title, now, now),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+        return self._conversation(row)
+
+    def get_conversation(self, conversation_id: str) -> ConversationRead | None:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+        return self._conversation(row) if row else None
+
+    def list_conversations(self) -> ConversationList:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM conversations ORDER BY updated_at DESC"
+            ).fetchall()
+        return ConversationList(items=[self._conversation(row) for row in rows], total=len(rows))
+
+    def get_conversation_detail(self, conversation_id: str) -> ConversationDetail | None:
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            return None
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """SELECT * FROM conversation_messages WHERE conversation_id = ?
+                ORDER BY created_at ASC, rowid ASC""",
+                (conversation_id,),
+            ).fetchall()
+        return ConversationDetail(
+            conversation=conversation,
+            messages=[self._conversation_message(row) for row in rows],
+        )
+
+    def update_conversation(
+        self, conversation_id: str, payload: ConversationUpdate
+    ) -> ConversationRead | None:
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            cursor = connection.execute(
+                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+                (payload.title, now, conversation_id),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+        return self._conversation(row) if cursor.rowcount and row else None
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        with closing(self.connect()) as connection:
+            cursor = connection.execute(
+                "DELETE FROM conversations WHERE id = ?", (conversation_id,)
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def recent_conversation_messages(self, conversation_id: str, limit: int = 8) -> list[dict]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """SELECT role, content FROM (
+                    SELECT rowid, role, content, created_at FROM conversation_messages
+                    WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
+                ) ORDER BY created_at ASC, rowid ASC""",
+                (conversation_id, limit),
+            ).fetchall()
+        return [{"role": row["role"], "content": row["content"]} for row in rows]
+
+    def save_conversation_exchange(
+        self, conversation_id: str, question: str, answer: AnswerResponse
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        citations = json.dumps([citation.model_dump(mode="json") for citation in answer.citations])
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """INSERT INTO conversation_messages
+                (id, conversation_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)""",
+                (str(uuid4()), conversation_id, question, now),
+            )
+            connection.execute(
+                """INSERT INTO conversation_messages
+                (id, conversation_id, role, content, citations_json, generated, grounded,
+                 scope_description, warning, created_at)
+                VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)""",
+                (str(uuid4()), conversation_id, answer.answer, citations, answer.generated,
+                 answer.grounded, answer.scope_description, answer.warning, now),
+            )
+            connection.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id)
+            )
+            connection.commit()
 
     def list(self, limit: int, offset: int) -> DocumentList:
         with closing(self.connect()) as connection:

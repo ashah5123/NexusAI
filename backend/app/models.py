@@ -314,6 +314,7 @@ class SearchResponse(BaseModel):
 
 class AnswerRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500)
+    conversation_id: str | None = None
     document_ids: list[str] = Field(default_factory=list, max_length=100)
     collection: str | None = Field(default=None, max_length=120)
     source_types: list[Literal["text", "markdown", "pdf", "image", "audio", "video", "transcript"]] = Field(
@@ -359,6 +360,61 @@ class AnswerResponse(BaseModel):
     warning: str | None = None
     grounded: bool = False
     scope_description: str = "All documents"
+    conversation_id: str | None = None
+
+
+class ConversationCreate(BaseModel):
+    title: str = Field(default="New conversation", min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class ConversationUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class ConversationRead(BaseModel):
+    id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationList(BaseModel):
+    items: list[ConversationRead]
+    total: int
+
+
+class ConversationMessageRead(BaseModel):
+    id: str
+    conversation_id: str
+    role: Literal["user", "assistant"]
+    content: str
+    citations: list[Citation] = Field(default_factory=list)
+    generated: bool = False
+    grounded: bool = False
+    scope_description: str = "All documents"
+    warning: str | None = None
+    created_at: datetime
+
+
+class ConversationDetail(BaseModel):
+    conversation: ConversationRead
+    messages: list[ConversationMessageRead]
 
 
 class AnswerStatus(BaseModel):

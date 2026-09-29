@@ -126,6 +126,9 @@ export default function App() {
   const [searchMeta, setSearchMeta] = useState(null);
   const [answer, setAnswer] = useState(null);
   const [answerStatus, setAnswerStatus] = useState(null);
+  const [conversations, setConversations] = useState([]);
+  const [activeConversationId, setActiveConversationId] = useState("");
+  const [conversationMessages, setConversationMessages] = useState([]);
   const [askCollection, setAskCollection] = useState("all");
   const [askSourceType, setAskSourceType] = useState("all");
   const [results, setResults] = useState([]);
@@ -193,6 +196,11 @@ export default function App() {
     setSavedViews(data.items);
   }, []);
 
+  const loadConversations = useCallback(async () => {
+    const data = await api("/api/conversations");
+    setConversations(data.items);
+  }, []);
+
   const loadNotes = useCallback(async (documentId) => {
     const data = await api(`/api/documents/${documentId}/notes`);
     if (activeNotesDocument.current === documentId) setNotes(data.items);
@@ -211,9 +219,10 @@ export default function App() {
     loadEmbeddingStatus().catch((err) => setError(err.message));
     loadIngestionJobs().catch((err) => setError(err.message));
     loadSavedViews().catch((err) => setError(err.message));
+    loadConversations().catch((err) => setError(err.message));
     api("/api/answers/status").then(setAnswerStatus).catch(() => setAnswerStatus(null));
     api("/api/speech/status").then(setSpeechStatus).catch(() => setSpeechStatus(null));
-  }, [loadDocuments, loadEmbeddingStatus, loadIngestionJobs, loadSavedViews]);
+  }, [loadDocuments, loadEmbeddingStatus, loadIngestionJobs, loadSavedViews, loadConversations]);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("nexusai-library-filters");
@@ -364,11 +373,17 @@ export default function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             question: normalized,
+            conversation_id: activeConversationId || null,
             collection: askCollection === "all" ? null : askCollection,
             source_types: askSourceType === "all" ? [] : [askSourceType],
           }),
         });
         setAnswer(data);
+        setActiveConversationId(data.conversation_id);
+        const detail = await api(`/api/conversations/${data.conversation_id}`);
+        setConversationMessages(detail.messages);
+        await loadConversations();
+        setQuery("");
         setSearchMeta(null);
         setSelected(null);
         return;
@@ -382,6 +397,61 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function openConversation(conversationId) {
+    if (!conversationId) {
+      setActiveConversationId("");
+      setConversationMessages([]);
+      setAnswer(null);
+      setQuery("");
+      return;
+    }
+    try {
+      const detail = await api(`/api/conversations/${conversationId}`);
+      setActiveConversationId(conversationId);
+      setConversationMessages(detail.messages);
+      const lastAssistantIndex = detail.messages.findLastIndex((message) => message.role === "assistant");
+      if (lastAssistantIndex >= 0) {
+        const latest = detail.messages[lastAssistantIndex];
+        const question = [...detail.messages.slice(0, lastAssistantIndex)].reverse().find((message) => message.role === "user")?.content || detail.conversation.title;
+        setAnswer({ ...latest, question, elapsed_ms: 0, model: "saved" });
+      } else {
+        setAnswer(null);
+      }
+      setSearchMeta(null);
+      setSelected(null);
+    } catch (err) { setError(err.message); }
+  }
+
+  function newConversation() {
+    setActiveConversationId("");
+    setConversationMessages([]);
+    setAnswer(null);
+    setQuery("");
+    searchInput.current?.focus();
+  }
+
+  async function renameConversation() {
+    const current = conversations.find((conversation) => conversation.id === activeConversationId);
+    if (!current) return;
+    const title = window.prompt("Rename conversation", current.title);
+    if (!title?.trim()) return;
+    try {
+      await api(`/api/conversations/${current.id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }),
+      });
+      await loadConversations();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function removeConversation() {
+    if (!activeConversationId || !window.confirm("Delete this conversation and its messages?")) return;
+    try {
+      await api(`/api/conversations/${activeConversationId}`, { method: "DELETE" });
+      newConversation();
+      await loadConversations();
+    } catch (err) { setError(err.message); }
   }
 
   async function importFile(event) {
@@ -1014,6 +1084,14 @@ export default function App() {
             </div>
           </form>
 
+          {workspaceMode === "ask" && (
+            <div className="conversation-bar">
+              <div><MessageSquareText size={14} /><select aria-label="Conversation history" value={activeConversationId} onChange={(event) => openConversation(event.target.value)}><option value="">New conversation</option>{conversations.map((conversation) => <option key={conversation.id} value={conversation.id}>{conversation.title}</option>)}</select></div>
+              <button type="button" onClick={newConversation}><Plus size={13} />New</button>
+              {activeConversationId && <><button type="button" onClick={renameConversation}><Pencil size={13} />Rename</button><button type="button" className="conversation-delete" onClick={removeConversation}><Trash2 size={13} />Delete</button></>}
+            </div>
+          )}
+
           {!!ingestionJobs.length && showActivity && (
             <section className="job-queue" aria-label="Import activity" aria-live="polite">
               <div className="job-queue-heading"><div><Activity size={15} /><strong>Import activity</strong><span>{activeJobs} active</span></div><div className="job-heading-actions">{ingestionJobs.some((job) => ["completed", "failed", "cancelled"].includes(job.status)) && <button type="button" onClick={clearFinishedJobs}>Clear finished</button>}<button className="icon-button" title="Hide activity" aria-label="Hide activity" onClick={() => setShowActivity(false)}><X size={16} /></button></div></div>
@@ -1097,11 +1175,17 @@ export default function App() {
             </article>
           ) : answer ? (
             <section className="answer-view view-enter">
-              <div className="answer-header"><p className="eyebrow">Grounded answer</p><h1>{answer.question}</h1><span>{answer.grounded ? "Citations verified" : answer.generated ? `Generated locally with ${answer.model}` : "Evidence mode"} · {answer.scope_description} · {answer.elapsed_ms} ms</span></div>
-              {answer.warning && <div className="search-warning">{answer.warning}</div>}
-              <div className="answer-copy">{answer.answer}</div>
-              <div className="evidence-heading"><h2>Sources</h2><span>{answer.citations.length} passages</span></div>
-              <div className="evidence-list">{answer.citations.map((citation) => <button key={`${citation.document_id}-${citation.number}`} className="evidence-row" onClick={() => openCitation(citation)}><span className="citation-number">{citation.number}</span><span className="evidence-copy"><strong>{citation.title}</strong><small>{citation.source_type}{citation.page_number ? ` · Page ${citation.page_number}` : ""}{citation.start_seconds != null ? ` · ${formatTimestamp(citation.start_seconds)} – ${formatTimestamp(citation.end_seconds)}` : ""}{citation.start_offset != null && !citation.page_number && citation.start_seconds == null ? " · Exact passage" : ""} · score {citation.score.toFixed(3)}</small><span>{citation.passage}</span></span><ArrowRight size={17} /></button>)}</div>
+              <div className="answer-header"><p className="eyebrow">Grounded conversation</p><h1>{conversations.find((conversation) => conversation.id === activeConversationId)?.title || answer.question}</h1><span>{conversationMessages.filter((message) => message.role === "user").length || 1} question(s) · follow-ups use recent thread context</span></div>
+              {conversationMessages.length ? <div className="conversation-thread">{conversationMessages.map((message) => message.role === "user" ? (
+                <article className="conversation-question" key={message.id}><span>You</span><p>{message.content}</p></article>
+              ) : (
+                <article className="conversation-answer" key={message.id}>
+                  <div className="conversation-answer-meta"><span>{message.grounded ? "Citations verified" : "Evidence mode"}</span><span>{message.scope_description}</span></div>
+                  {message.warning && <div className="search-warning">{message.warning}</div>}
+                  <div className="answer-copy">{message.content}</div>
+                  {!!message.citations.length && <><div className="evidence-heading"><h2>Sources</h2><span>{message.citations.length} passages</span></div><div className="evidence-list">{message.citations.map((citation) => <button key={`${message.id}-${citation.number}`} className="evidence-row" onClick={() => openCitation(citation)}><span className="citation-number">{citation.number}</span><span className="evidence-copy"><strong>{citation.title}</strong><small>{citation.source_type}{citation.page_number ? ` · Page ${citation.page_number}` : ""}{citation.start_seconds != null ? ` · ${formatTimestamp(citation.start_seconds)} – ${formatTimestamp(citation.end_seconds)}` : ""}{citation.start_offset != null && !citation.page_number && citation.start_seconds == null ? " · Exact passage" : ""} · score {citation.score.toFixed(3)}</small><span>{citation.passage}</span></span><ArrowRight size={17} /></button>)}</div></>}
+                </article>
+              ))}</div> : <><div className="answer-copy">{answer.answer}</div><div className="evidence-list">{answer.citations.map((citation) => <button key={`${citation.document_id}-${citation.number}`} className="evidence-row" onClick={() => openCitation(citation)}><span className="citation-number">{citation.number}</span><span className="evidence-copy"><strong>{citation.title}</strong><span>{citation.passage}</span></span><ArrowRight size={17} /></button>)}</div></>}
             </section>
           ) : (
             <section className="results-view view-enter">

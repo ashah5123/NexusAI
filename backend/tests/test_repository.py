@@ -11,7 +11,10 @@ import pymupdf
 from PIL import Image, ImageDraw
 
 from app.models import (
+    AnswerResponse,
     BulkDocumentUpdate,
+    ConversationCreate,
+    ConversationUpdate,
     DocumentCreate,
     DocumentHighlightCreate,
     DocumentHighlightUpdate,
@@ -214,6 +217,31 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertEqual(updated.date_range, "7d")
         self.assertTrue(self.repository.delete_saved_view(created.id))
         self.assertEqual(self.repository.list_saved_views().total, 0)
+
+    def test_conversation_history_lifecycle(self) -> None:
+        conversation = self.repository.create_conversation(
+            ConversationCreate(title="Atlas ownership")
+        )
+        answer = AnswerResponse(
+            question="Who owns Atlas?", answer="Maya owns Atlas [1].", citations=[],
+            model="test", generated=True, elapsed_ms=2, grounded=True,
+            scope_description="All documents", conversation_id=conversation.id,
+        )
+        self.repository.save_conversation_exchange(
+            conversation.id, "Who owns Atlas?", answer
+        )
+        detail = self.repository.get_conversation_detail(conversation.id)
+        renamed = self.repository.update_conversation(
+            conversation.id, ConversationUpdate(title="Atlas launch")
+        )
+
+        self.assertEqual(len(detail.messages), 2)
+        self.assertEqual(detail.messages[0].role, "user")
+        self.assertEqual(detail.messages[1].content, "Maya owns Atlas [1].")
+        self.assertEqual(len(self.repository.recent_conversation_messages(conversation.id)), 2)
+        self.assertEqual(renamed.title, "Atlas launch")
+        self.assertTrue(self.repository.delete_conversation(conversation.id))
+        self.assertIsNone(self.repository.get_conversation_detail(conversation.id))
 
     def test_document_notes_can_be_created_updated_and_deleted(self) -> None:
         document = self.repository.create(

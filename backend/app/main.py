@@ -20,6 +20,11 @@ from .models import (
     BulkDocumentUpdate,
     BulkUpdateResult,
     CleanupResult,
+    ConversationCreate,
+    ConversationDetail,
+    ConversationList,
+    ConversationRead,
+    ConversationUpdate,
     DocumentCreate,
     DocumentList,
     DocumentNoteCreate,
@@ -73,7 +78,7 @@ async def lifespan(_: FastAPI):
         ingestion_worker.stop()
 
 
-app = FastAPI(title="NexusAI API", version="0.14.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.15.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -382,10 +387,57 @@ def answer_status() -> AnswerStatus:
     return AnswerStatus(model=answer_service.model_name, available=answer_service.available())
 
 
+@app.get("/api/conversations", response_model=ConversationList)
+def list_conversations() -> ConversationList:
+    return repository.list_conversations()
+
+
+@app.post(
+    "/api/conversations", response_model=ConversationRead, status_code=status.HTTP_201_CREATED
+)
+def create_conversation(payload: ConversationCreate) -> ConversationRead:
+    return repository.create_conversation(payload)
+
+
+@app.get("/api/conversations/{conversation_id}", response_model=ConversationDetail)
+def get_conversation(conversation_id: str) -> ConversationDetail:
+    conversation = repository.get_conversation_detail(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
+
+
+@app.patch("/api/conversations/{conversation_id}", response_model=ConversationRead)
+def update_conversation(
+    conversation_id: str, payload: ConversationUpdate
+) -> ConversationRead:
+    conversation = repository.update_conversation(conversation_id, payload)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
+
+
+@app.delete("/api/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_conversation(conversation_id: str) -> Response:
+    if not repository.delete_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.post("/api/answers", response_model=AnswerResponse)
 def answer_question(payload: AnswerRequest) -> AnswerResponse:
+    if payload.conversation_id:
+        conversation = repository.get_conversation(payload.conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+    else:
+        title = payload.question[:80].rstrip()
+        conversation = repository.create_conversation(ConversationCreate(title=title))
+    history = repository.recent_conversation_messages(conversation.id)
+    prior_questions = [message["content"] for message in history if message["role"] == "user"][-2:]
+    retrieval_query = " ".join([*prior_questions, payload.question])
     passages, warning = repository.retrieve(
-        payload.question,
+        retrieval_query,
         6,
         embedding_service,
         payload.document_ids,
@@ -400,7 +452,10 @@ def answer_question(payload: AnswerRequest) -> AnswerResponse:
     if payload.document_ids:
         scope_parts.append(f"{len(payload.document_ids)} selected document(s)")
     scope = " · ".join(scope_parts) if scope_parts else "All documents"
-    return answer_service.answer(payload.question, passages, warning, scope)
+    answer = answer_service.answer(payload.question, passages, warning, scope, history)
+    answer = answer.model_copy(update={"conversation_id": conversation.id})
+    repository.save_conversation_exchange(conversation.id, payload.question, answer)
+    return answer
 
 
 @app.get("/api/speech/status", response_model=SpeechStatus)
