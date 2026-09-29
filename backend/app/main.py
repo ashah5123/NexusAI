@@ -24,6 +24,10 @@ from .models import (
     DocumentNoteList,
     DocumentNoteRead,
     DocumentNoteUpdate,
+    DocumentHighlightCreate,
+    DocumentHighlightList,
+    DocumentHighlightRead,
+    DocumentHighlightUpdate,
     DocumentRead,
     DocumentUpdate,
     EmbeddingStatus,
@@ -62,7 +66,7 @@ async def lifespan(_: FastAPI):
         ingestion_worker.stop()
 
 
-app = FastAPI(title="NexusAI API", version="0.11.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.12.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -266,6 +270,54 @@ def update_document_note(
 def delete_document_note(document_id: str, note_id: str) -> Response:
     if not repository.delete_note(document_id, note_id):
         raise HTTPException(status_code=404, detail="Note not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/api/documents/{document_id}/highlights", response_model=DocumentHighlightList)
+def list_document_highlights(document_id: str) -> DocumentHighlightList:
+    highlights = repository.list_highlights(document_id)
+    if highlights is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return highlights
+
+
+@app.post(
+    "/api/documents/{document_id}/highlights",
+    response_model=DocumentHighlightRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_document_highlight(
+    document_id: str, payload: DocumentHighlightCreate
+) -> DocumentHighlightRead:
+    try:
+        highlight = repository.create_highlight(document_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if highlight is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return highlight
+
+
+@app.patch(
+    "/api/documents/{document_id}/highlights/{highlight_id}",
+    response_model=DocumentHighlightRead,
+)
+def update_document_highlight(
+    document_id: str, highlight_id: str, payload: DocumentHighlightUpdate
+) -> DocumentHighlightRead:
+    highlight = repository.update_highlight(document_id, highlight_id, payload)
+    if highlight is None:
+        raise HTTPException(status_code=404, detail="Highlight not found")
+    return highlight
+
+
+@app.delete(
+    "/api/documents/{document_id}/highlights/{highlight_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_document_highlight(document_id: str, highlight_id: str) -> Response:
+    if not repository.delete_highlight(document_id, highlight_id):
+        raise HTTPException(status_code=404, detail="Highlight not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

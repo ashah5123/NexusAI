@@ -9,8 +9,10 @@ import {
   FileImage,
   FileText,
   FileVideo,
+  Download,
   Folder,
   Headphones,
+  Highlighter,
   LayoutList,
   LoaderCircle,
   Menu,
@@ -65,6 +67,29 @@ function HighlightedSnippet({ value }) {
     }
     return highlighted ? <mark key={index}>{part}</mark> : <span key={index}>{part}</span>;
   });
+}
+
+function AnnotatedContent({ content, highlights, onSelect, onHighlightClick, contentRef }) {
+  const parts = [];
+  let cursor = 0;
+  for (const highlight of highlights) {
+    if (highlight.start_offset < cursor || highlight.end_offset > content.length) continue;
+    if (highlight.start_offset > cursor) parts.push(content.slice(cursor, highlight.start_offset));
+    parts.push(
+      <mark
+        className={`reader-highlight highlight-${highlight.color}`}
+        data-highlight-id={highlight.id}
+        key={highlight.id}
+        title={highlight.annotation || "Saved highlight"}
+        onClick={() => onHighlightClick(highlight)}
+      >
+        {content.slice(highlight.start_offset, highlight.end_offset)}
+      </mark>,
+    );
+    cursor = highlight.end_offset;
+  }
+  if (cursor < content.length) parts.push(content.slice(cursor));
+  return <div className="document-content" ref={contentRef} onMouseUp={onSelect}>{parts}</div>;
 }
 
 function formatDate(value) {
@@ -126,9 +151,15 @@ export default function App() {
   const [notes, setNotes] = useState([]);
   const [noteDraft, setNoteDraft] = useState("");
   const [editingNoteId, setEditingNoteId] = useState(null);
+  const [highlights, setHighlights] = useState([]);
+  const [highlightDraft, setHighlightDraft] = useState(null);
+  const [highlightColor, setHighlightColor] = useState("yellow");
+  const [highlightAnnotation, setHighlightAnnotation] = useState("");
+  const [editingHighlightId, setEditingHighlightId] = useState(null);
   const completedJobs = useRef(new Set());
   const searchInput = useRef(null);
   const activeNotesDocument = useRef(null);
+  const documentContentRef = useRef(null);
 
   const loadDocuments = useCallback(async () => {
     const data = await api("/api/documents");
@@ -148,6 +179,11 @@ export default function App() {
   const loadNotes = useCallback(async (documentId) => {
     const data = await api(`/api/documents/${documentId}/notes`);
     if (activeNotesDocument.current === documentId) setNotes(data.items);
+  }, []);
+
+  const loadHighlights = useCallback(async (documentId) => {
+    const data = await api(`/api/documents/${documentId}/highlights`);
+    if (activeNotesDocument.current === documentId) setHighlights(data.items);
   }, []);
 
   useEffect(() => {
@@ -388,7 +424,12 @@ export default function App() {
     setNotes([]);
     setNoteDraft("");
     setEditingNoteId(null);
+    setHighlights([]);
+    setHighlightDraft(null);
+    setHighlightAnnotation("");
+    setEditingHighlightId(null);
     loadNotes(document.id).catch((err) => setError(err.message));
+    loadHighlights(document.id).catch((err) => setError(err.message));
     setSourceLocation({
       page: location.page ?? document.page_number ?? null,
       start: location.start ?? document.start_seconds ?? null,
@@ -463,6 +504,101 @@ export default function App() {
     } catch (err) {
       setError(err.message);
     }
+  }
+
+  function captureHighlightSelection() {
+    const root = documentContentRef.current;
+    const selection = window.getSelection();
+    if (!root || !selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+    const range = selection.getRangeAt(0);
+    if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
+    const beforeStart = range.cloneRange();
+    beforeStart.selectNodeContents(root);
+    beforeStart.setEnd(range.startContainer, range.startOffset);
+    const beforeEnd = range.cloneRange();
+    beforeEnd.selectNodeContents(root);
+    beforeEnd.setEnd(range.endContainer, range.endOffset);
+    const start = beforeStart.toString().length;
+    const end = beforeEnd.toString().length;
+    const selectedText = selected.content.slice(start, end);
+    if (!selectedText.trim()) return;
+    setEditingHighlightId(null);
+    setHighlightDraft({ start_offset: start, end_offset: end, selected_text: selectedText });
+    setHighlightAnnotation("");
+  }
+
+  async function saveHighlight(event) {
+    event.preventDefault();
+    if (!selected || !highlightDraft) return;
+    setBusy(true);
+    try {
+      const saved = await api(`/api/documents/${selected.id}/highlights${editingHighlightId ? `/${editingHighlightId}` : ""}`, {
+        method: editingHighlightId ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editingHighlightId
+          ? { color: highlightColor, annotation: highlightAnnotation }
+          : { ...highlightDraft, color: highlightColor, annotation: highlightAnnotation }),
+      });
+      setHighlights((current) => (editingHighlightId
+        ? current.map((item) => item.id === saved.id ? saved : item)
+        : [...current, saved].sort((a, b) => a.start_offset - b.start_offset)));
+      setHighlightDraft(null);
+      setHighlightAnnotation("");
+      setEditingHighlightId(null);
+      window.getSelection()?.removeAllRanges();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteHighlight(highlight) {
+    try {
+      await api(`/api/documents/${highlight.document_id}/highlights/${highlight.id}`, { method: "DELETE" });
+      setHighlights((current) => current.filter((item) => item.id !== highlight.id));
+      if (editingHighlightId === highlight.id) {
+        setEditingHighlightId(null);
+        setHighlightDraft(null);
+        setHighlightAnnotation("");
+      }
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  function editHighlight(highlight) {
+    setEditingHighlightId(highlight.id);
+    setHighlightDraft({
+      start_offset: highlight.start_offset,
+      end_offset: highlight.end_offset,
+      selected_text: highlight.selected_text,
+    });
+    setHighlightColor(highlight.color);
+    setHighlightAnnotation(highlight.annotation || "");
+  }
+
+  function jumpToHighlight(highlight) {
+    document.querySelector(`[data-highlight-id="${highlight.id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function exportAnnotations() {
+    if (!selected) return;
+    const lines = [`# ${selected.title}`, "", "## Highlights", ""];
+    highlights.forEach((highlight) => {
+      lines.push(`> ${highlight.selected_text.replaceAll("\n", " ")}`);
+      if (highlight.annotation) lines.push("", highlight.annotation);
+      lines.push("", `<!-- offsets ${highlight.start_offset}-${highlight.end_offset}; color ${highlight.color} -->`, "");
+    });
+    lines.push("## Notes", "");
+    notes.forEach((note) => lines.push(`- ${note.content.replaceAll("\n", " ")}`));
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${selected.title.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "document"}-annotations.md`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   function editMetadata(document) {
@@ -726,6 +862,25 @@ export default function App() {
                 <label>Voice<select value={voiceName} onChange={(event) => setVoiceName(event.target.value)}>{speechVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select></label>
                 <label>Speed <output>{rate.toFixed(1)}x</output><input type="range" min="0.6" max="1.6" step="0.1" value={rate} onChange={(event) => setRate(Number(event.target.value))} /></label>
               </div>
+              <section className="highlights-panel" aria-label="Document highlights">
+                <div className="notes-heading"><div><Highlighter size={16} /><h2>Highlights</h2><span>{highlights.length}</span></div><div className="highlight-heading-actions"><small>Select text below to highlight it</small><button type="button" title="Export notes and highlights" onClick={exportAnnotations}><Download size={14} />Export</button></div></div>
+                {highlightDraft && (
+                  <form className="highlight-form" onSubmit={saveHighlight}>
+                    <blockquote>{highlightDraft.selected_text}</blockquote>
+                    <div className="highlight-fields">
+                      <label>Color<select value={highlightColor} onChange={(event) => setHighlightColor(event.target.value)}><option value="yellow">Yellow</option><option value="green">Green</option><option value="blue">Blue</option><option value="pink">Pink</option></select></label>
+                      <label>Annotation<input value={highlightAnnotation} onChange={(event) => setHighlightAnnotation(event.target.value)} maxLength="10000" placeholder="Optional note about this passage" /></label>
+                    </div>
+                    <div><button type="button" className="secondary-button" onClick={() => { setHighlightDraft(null); setEditingHighlightId(null); setHighlightAnnotation(""); }}>Cancel</button><button className="primary-button" disabled={busy}><Highlighter size={16} />{editingHighlightId ? "Update highlight" : "Save highlight"}</button></div>
+                  </form>
+                )}
+                {!!highlights.length && <div className="highlight-list">{highlights.map((highlight) => (
+                  <article key={highlight.id} className={`highlight-card highlight-${highlight.color}`}>
+                    <button type="button" className="highlight-jump" onClick={() => jumpToHighlight(highlight)}><q>{highlight.selected_text}</q>{highlight.annotation && <span>{highlight.annotation}</span>}</button>
+                    <div className="highlight-actions"><button type="button" onClick={() => editHighlight(highlight)}>Edit</button><button type="button" className="highlight-delete" onClick={() => deleteHighlight(highlight)}>Delete</button></div>
+                  </article>
+                ))}</div>}
+              </section>
               <section className="notes-panel" aria-label="Document notes">
                 <div className="notes-heading"><div><StickyNote size={16} /><h2>Notes</h2><span>{notes.length}</span></div></div>
                 <form className="note-form" onSubmit={saveNote}>
@@ -745,7 +900,7 @@ export default function App() {
                   {!notes.length && <p className="empty-notes">No notes for this source yet.</p>}
                 </div>
               </section>
-              <div className="document-content">{selected.content}</div>
+              <AnnotatedContent content={selected.content} highlights={highlights} contentRef={documentContentRef} onSelect={captureHighlightSelection} onHighlightClick={jumpToHighlight} />
             </article>
           ) : answer ? (
             <section className="answer-view view-enter">

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class HealthResponse(BaseModel):
@@ -121,6 +121,65 @@ class DocumentNoteRead(BaseModel):
 
 class DocumentNoteList(BaseModel):
     items: list[DocumentNoteRead]
+    total: int
+
+
+class DocumentHighlightCreate(BaseModel):
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(gt=0)
+    selected_text: str = Field(min_length=1, max_length=20_000)
+    color: Literal["yellow", "green", "blue", "pink"] = "yellow"
+    annotation: str | None = Field(default=None, max_length=10_000)
+
+    @model_validator(mode="after")
+    def validate_offsets(self) -> "DocumentHighlightCreate":
+        if self.end_offset <= self.start_offset:
+            raise ValueError("end_offset must be greater than start_offset")
+        if self.end_offset - self.start_offset != len(self.selected_text):
+            raise ValueError("offset span must equal selected_text length")
+        return self
+
+    @field_validator("selected_text")
+    @classmethod
+    def reject_blank_selection(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("annotation")
+    @classmethod
+    def normalize_annotation(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class DocumentHighlightUpdate(BaseModel):
+    color: Literal["yellow", "green", "blue", "pink"] | None = None
+    annotation: str | None = Field(default=None, max_length=10_000)
+
+    @field_validator("annotation")
+    @classmethod
+    def normalize_annotation(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class DocumentHighlightRead(BaseModel):
+    id: str
+    document_id: str
+    start_offset: int
+    end_offset: int
+    selected_text: str
+    color: str
+    annotation: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentHighlightList(BaseModel):
+    items: list[DocumentHighlightRead]
     total: int
 
 
