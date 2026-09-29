@@ -87,6 +87,43 @@ class DocumentList(BaseModel):
     total: int
 
 
+class DocumentNoteCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=10_000)
+
+    @field_validator("content")
+    @classmethod
+    def reject_blank_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class DocumentNoteUpdate(BaseModel):
+    content: str = Field(min_length=1, max_length=10_000)
+
+    @field_validator("content")
+    @classmethod
+    def reject_blank_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class DocumentNoteRead(BaseModel):
+    id: str
+    document_id: str
+    content: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentNoteList(BaseModel):
+    items: list[DocumentNoteRead]
+    total: int
+
+
 class IngestionJob(BaseModel):
     id: str
     title: str

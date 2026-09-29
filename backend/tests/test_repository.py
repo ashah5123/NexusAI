@@ -10,7 +10,7 @@ import numpy as np
 import pymupdf
 from PIL import Image, ImageDraw
 
-from app.models import DocumentCreate, DocumentUpdate
+from app.models import DocumentCreate, DocumentNoteCreate, DocumentNoteUpdate, DocumentUpdate
 from app.embedding import EmbeddingService
 from app.generation import OllamaAnswerService
 from app.ingestion import IngestionError, extract_image, extract_pdf
@@ -137,6 +137,39 @@ class DocumentRepositoryTest(unittest.TestCase):
             self.repository.search("Published", 10, "keyword", FakeEmbedder()).items[0].id,
             document.id,
         )
+
+    def test_document_notes_can_be_created_updated_and_deleted(self) -> None:
+        document = self.repository.create(
+            DocumentCreate(title="Annotated memo", content="Local note taking matters.")
+        )
+
+        created = self.repository.create_note(
+            document.id,
+            DocumentNoteCreate(content=" Summarize the decision section. "),
+        )
+        updated = self.repository.update_note(
+            document.id,
+            created.id,
+            DocumentNoteUpdate(content="Decision: keep notes local."),
+        )
+        notes = self.repository.list_notes(document.id)
+
+        self.assertEqual(created.content, "Summarize the decision section.")
+        self.assertEqual(updated.content, "Decision: keep notes local.")
+        self.assertEqual(notes.total, 1)
+        self.assertEqual(notes.items[0].id, created.id)
+        self.assertTrue(self.repository.delete_note(document.id, created.id))
+        self.assertEqual(self.repository.list_notes(document.id).total, 0)
+
+    def test_document_delete_cascades_notes(self) -> None:
+        document = self.repository.create(
+            DocumentCreate(title="Temporary memo", content="Remove this source.")
+        )
+        self.repository.create_note(document.id, DocumentNoteCreate(content="No longer needed."))
+
+        self.assertTrue(self.repository.delete(document.id))
+
+        self.assertIsNone(self.repository.list_notes(document.id))
 
     def test_chunking_has_bounded_size_and_overlap(self) -> None:
         words = [f"word{index}" for index in range(CHUNK_WORDS + 20)]

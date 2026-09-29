@@ -173,6 +173,23 @@ mark { border-radius: 2px; padding: 1px 2px; color: #292114; background: #f7d788
 .speech-panel select { height: 38px; min-width: 0; border: 1px solid #b5c0ba; border-radius: 4px; padding: 0 8px; color: #26332e; background: #fff; }
 .speech-panel output { float: right; color: #a34a2d; }
 .speech-panel input[type="range"] { width: 100%; accent-color: #a34a2d; }
+.notes-panel { margin-top: 18px; border: 1px solid #cbd8d2; border-radius: 7px; background: #fff; overflow: hidden; }
+.notes-heading { display: flex; align-items: center; justify-content: space-between; min-height: 42px; border-bottom: 1px solid #dce4e0; padding: 0 14px; color: #4d5d56; background: #f4f7f5; }
+.notes-heading > div { display: flex; align-items: center; gap: 8px; }
+.notes-heading h2 { margin: 0; font-size: 13px; font-weight: 850; text-transform: uppercase; }
+.notes-heading span { display: grid; place-items: center; min-width: 21px; height: 20px; border-radius: 10px; color: #fff; background: #60736a; font-size: 10px; font-weight: 850; }
+.note-form { display: grid; gap: 10px; padding: 14px; border-bottom: 1px solid #e1e7e4; background: #fbfcfb; }
+.note-form textarea { width: 100%; min-height: 92px; border: 1px solid #b8c4be; border-radius: 5px; padding: 11px; color: #202d28; background: #fff; line-height: 1.55; resize: vertical; outline: 0; }
+.note-form textarea:focus { border-color: #167d62; box-shadow: 0 0 0 3px rgba(22,125,98,0.09); }
+.note-form > div { display: flex; justify-content: flex-end; gap: 8px; }
+.notes-list { display: grid; }
+.note-row { display: grid; gap: 10px; border-bottom: 1px solid #e3e9e6; padding: 14px; }
+.note-row:last-child { border-bottom: 0; }
+.note-row p { margin: 0; white-space: pre-wrap; color: #29342f; font-size: 13px; line-height: 1.6; }
+.note-row div { display: flex; align-items: center; gap: 10px; color: #7a867f; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+.note-row button { border: 0; padding: 0; color: #167d62; background: transparent; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+.note-row button:hover { color: #0d5a45; text-decoration: underline; }
+.empty-notes { margin: 0; padding: 18px 14px; color: #77837d; font-size: 12px; }
 .document-content { max-width: 850px; margin-top: 36px; white-space: pre-wrap; color: #29342f; font: 17px/1.82 Georgia, "Times New Roman", serif; }
 
 .answer-view { max-width: 980px; }
@@ -282,6 +299,8 @@ mark { border-radius: 2px; padding: 1px 2px; color: #292114; background: #f7d788
   .reader-title { align-items: flex-start; }
   .source-viewer iframe { height: 480px; }
   .speech-panel { grid-template-columns: 1fr; gap: 14px; }
+  .note-form > div { justify-content: stretch; }
+  .note-form .primary-button, .note-form .secondary-button { flex: 1; }
   .field-row { grid-template-columns: 1fr; gap: 0; }
   .answer-header h1 { font-size: 27px; }
   .answer-copy { padding-left: 14px; font-size: 17px; }

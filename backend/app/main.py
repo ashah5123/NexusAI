@@ -20,6 +20,10 @@ from .models import (
     CleanupResult,
     DocumentCreate,
     DocumentList,
+    DocumentNoteCreate,
+    DocumentNoteList,
+    DocumentNoteRead,
+    DocumentNoteUpdate,
     DocumentRead,
     DocumentUpdate,
     EmbeddingStatus,
@@ -58,7 +62,7 @@ async def lifespan(_: FastAPI):
         ingestion_worker.stop()
 
 
-app = FastAPI(title="NexusAI API", version="0.10.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.11.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -214,6 +218,54 @@ def delete_document(document_id: str) -> Response:
         raise HTTPException(status_code=404, detail="Document not found")
     if source_path:
         source_path.unlink(missing_ok=True)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/api/documents/{document_id}/notes", response_model=DocumentNoteList)
+def list_document_notes(document_id: str) -> DocumentNoteList:
+    notes = repository.list_notes(document_id)
+    if notes is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return notes
+
+
+@app.post(
+    "/api/documents/{document_id}/notes",
+    response_model=DocumentNoteRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_document_note(
+    document_id: str,
+    payload: DocumentNoteCreate,
+) -> DocumentNoteRead:
+    note = repository.create_note(document_id, payload)
+    if note is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return note
+
+
+@app.patch(
+    "/api/documents/{document_id}/notes/{note_id}",
+    response_model=DocumentNoteRead,
+)
+def update_document_note(
+    document_id: str,
+    note_id: str,
+    payload: DocumentNoteUpdate,
+) -> DocumentNoteRead:
+    note = repository.update_note(document_id, note_id, payload)
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return note
+
+
+@app.delete(
+    "/api/documents/{document_id}/notes/{note_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_document_note(document_id: str, note_id: str) -> Response:
+    if not repository.delete_note(document_id, note_id):
+        raise HTTPException(status_code=404, detail="Note not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

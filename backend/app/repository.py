@@ -15,6 +15,10 @@ import numpy as np
 from .models import (
     DocumentCreate,
     DocumentList,
+    DocumentNoteCreate,
+    DocumentNoteList,
+    DocumentNoteRead,
+    DocumentNoteUpdate,
     DocumentRead,
     DocumentUpdate,
     EmbeddingStatus,
@@ -116,6 +120,17 @@ class DocumentRepository:
 
                 CREATE INDEX IF NOT EXISTS ingestion_jobs_status_created
                 ON ingestion_jobs(status, created_at);
+
+                CREATE TABLE IF NOT EXISTS document_notes (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS document_notes_document_updated
+                ON document_notes(document_id, updated_at);
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
                     title, content, content='chunks', content_rowid='id',
@@ -257,6 +272,10 @@ class DocumentRepository:
         row["favorite"] = bool(row.get("favorite"))
         row["source_available"] = bool(row.get("source_path"))
         return SearchHit(**row)
+
+    @staticmethod
+    def _note(row: sqlite3.Row) -> DocumentNoteRead:
+        return DocumentNoteRead(**{key: row[key] for key in DocumentNoteRead.model_fields})
 
     def create(
         self,
@@ -509,6 +528,67 @@ class DocumentRepository:
     def delete(self, document_id: str) -> bool:
         with closing(self.connect()) as connection:
             cursor = connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def list_notes(self, document_id: str) -> DocumentNoteList | None:
+        if self.get(document_id) is None:
+            return None
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """SELECT * FROM document_notes
+                WHERE document_id = ?
+                ORDER BY updated_at DESC, created_at DESC""",
+                (document_id,),
+            ).fetchall()
+        return DocumentNoteList(items=[self._note(row) for row in rows], total=len(rows))
+
+    def create_note(self, document_id: str, payload: DocumentNoteCreate) -> DocumentNoteRead | None:
+        if self.get(document_id) is None:
+            return None
+        note_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """INSERT INTO document_notes
+                (id, document_id, content, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)""",
+                (note_id, document_id, payload.content, now, now),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM document_notes WHERE id = ?", (note_id,)
+            ).fetchone()
+        return self._note(row)
+
+    def update_note(
+        self,
+        document_id: str,
+        note_id: str,
+        payload: DocumentNoteUpdate,
+    ) -> DocumentNoteRead | None:
+        now = datetime.now(UTC).isoformat()
+        with closing(self.connect()) as connection:
+            cursor = connection.execute(
+                """UPDATE document_notes
+                SET content = ?, updated_at = ?
+                WHERE id = ? AND document_id = ?""",
+                (payload.content, now, note_id, document_id),
+            )
+            connection.commit()
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM document_notes WHERE id = ?", (note_id,)
+            ).fetchone()
+        return self._note(row)
+
+    def delete_note(self, document_id: str, note_id: str) -> bool:
+        with closing(self.connect()) as connection:
+            cursor = connection.execute(
+                "DELETE FROM document_notes WHERE id = ? AND document_id = ?",
+                (note_id, document_id),
+            )
             connection.commit()
         return cursor.rowcount > 0
 

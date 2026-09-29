@@ -23,6 +23,7 @@ import {
   Sparkles,
   Square,
   Star,
+  StickyNote,
   Tags,
   Trash2,
   UploadCloud,
@@ -122,8 +123,12 @@ export default function App() {
   const [metadataForm, setMetadataForm] = useState({ title: "", collection: "", tags: "" });
   const [sortMode, setSortMode] = useState("recent");
   const [collectionFilter, setCollectionFilter] = useState("all");
+  const [notes, setNotes] = useState([]);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [editingNoteId, setEditingNoteId] = useState(null);
   const completedJobs = useRef(new Set());
   const searchInput = useRef(null);
+  const activeNotesDocument = useRef(null);
 
   const loadDocuments = useCallback(async () => {
     const data = await api("/api/documents");
@@ -138,6 +143,11 @@ export default function App() {
   const loadIngestionJobs = useCallback(async () => {
     const data = await api("/api/ingestion-jobs?limit=8");
     setIngestionJobs(data.items);
+  }, []);
+
+  const loadNotes = useCallback(async (documentId) => {
+    const data = await api(`/api/documents/${documentId}/notes`);
+    if (activeNotesDocument.current === documentId) setNotes(data.items);
   }, []);
 
   useEffect(() => {
@@ -374,6 +384,11 @@ export default function App() {
 
   function openDocument(document, location = {}) {
     setSelected(document);
+    activeNotesDocument.current = document.id;
+    setNotes([]);
+    setNoteDraft("");
+    setEditingNoteId(null);
+    loadNotes(document.id).catch((err) => setError(err.message));
     setSourceLocation({
       page: location.page ?? document.page_number ?? null,
       start: location.start ?? document.start_seconds ?? null,
@@ -397,6 +412,54 @@ export default function App() {
   async function toggleFavorite(document) {
     try {
       await updateDocumentMetadata(document, { favorite: !document.favorite });
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function saveNote(event) {
+    event.preventDefault();
+    if (!selected || !noteDraft.trim()) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (editingNoteId) {
+        const updated = await api(`/api/documents/${selected.id}/notes/${editingNoteId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: noteDraft }),
+        });
+        setNotes((current) => current.map((note) => note.id === updated.id ? updated : note));
+      } else {
+        const created = await api(`/api/documents/${selected.id}/notes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: noteDraft }),
+        });
+        setNotes((current) => [created, ...current]);
+      }
+      setNoteDraft("");
+      setEditingNoteId(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function editNote(note) {
+    setEditingNoteId(note.id);
+    setNoteDraft(note.content);
+  }
+
+  async function deleteNote(note) {
+    try {
+      await api(`/api/documents/${note.document_id}/notes/${note.id}`, { method: "DELETE" });
+      setNotes((current) => current.filter((item) => item.id !== note.id));
+      if (editingNoteId === note.id) {
+        setEditingNoteId(null);
+        setNoteDraft("");
+      }
     } catch (err) {
       setError(err.message);
     }
@@ -434,6 +497,8 @@ export default function App() {
       await api(`/api/documents/${document.id}`, { method: "DELETE" });
       if (selected?.id === document.id) {
         setSelected(null);
+        activeNotesDocument.current = null;
+        setNotes([]);
         setSourceLocation({ page: null, start: null, end: null });
       }
       setResults((current) => current.filter((item) => item.id !== document.id));
@@ -547,13 +612,13 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <button className="icon-button mobile-menu" title="Open library" aria-label="Open library" onClick={() => setMobileLibraryOpen(true)}><Menu size={19} /></button>
-        <button className="brand" onClick={() => { setSelected(null); setSourceLocation({ page: null, start: null, end: null }); setSearchMeta(null); }}>
+        <button className="brand" onClick={() => { setSelected(null); activeNotesDocument.current = null; setNotes([]); setSourceLocation({ page: null, start: null, end: null }); setSearchMeta(null); }}>
           <span className="brand-mark">N</span>
           <span>NexusAI</span>
         </button>
         <nav className="workspace-tabs" aria-label="Workspace mode">
-          <button className={workspaceMode === "search" ? "active" : ""} onClick={() => { setWorkspaceMode("search"); setSelected(null); setAnswer(null); setSearchMeta(null); }}><Search size={15} />Search</button>
-          <button className={workspaceMode === "ask" ? "active" : ""} onClick={() => { setWorkspaceMode("ask"); setSelected(null); setAnswer(null); setSearchMeta(null); }}><MessageSquareText size={15} />Ask</button>
+          <button className={workspaceMode === "search" ? "active" : ""} onClick={() => { setWorkspaceMode("search"); setSelected(null); activeNotesDocument.current = null; setNotes([]); setAnswer(null); setSearchMeta(null); }}><Search size={15} />Search</button>
+          <button className={workspaceMode === "ask" ? "active" : ""} onClick={() => { setWorkspaceMode("ask"); setSelected(null); activeNotesDocument.current = null; setNotes([]); setAnswer(null); setSearchMeta(null); }}><MessageSquareText size={15} />Ask</button>
         </nav>
         {!!ingestionJobs.length && (
           <button className={`icon-button activity-button ${showActivity ? "active" : ""}`} title="Import activity" aria-label="Toggle import activity" onClick={() => setShowActivity((current) => !current)}>
@@ -644,7 +709,7 @@ export default function App() {
           {selected ? (
             <article className="reader view-enter">
               <div className="reader-header">
-                <div><button className="back-button" onClick={() => { setSelected(null); setSourceLocation({ page: null, start: null, end: null }); }}><ArrowLeft size={15} />Back</button><div className="reader-title"><span className={`source-icon source-${selected.source_type}`}><SourceIcon type={selected.source_type} size={19} /></span><h1>{selected.title}</h1></div><p>{formatDate(selected.created_at)} · {selected.word_count.toLocaleString()} words · {selected.source_type}{selected.source_type === "pdf" ? ` · ${selected.page_count} pages` : ""}{selected.ocr_applied ? " · OCR" : ""}{selected.duration_seconds ? ` · ${formatTimestamp(selected.duration_seconds)}` : ""}{selected.language ? ` · ${selected.language.toUpperCase()}` : ""}</p>{(selected.collection || selected.tags.length > 0) && <div className="metadata-line">{selected.collection && <span><Folder size={12} />{selected.collection}</span>}{selected.tags.map((tag) => <span key={tag}><Tags size={12} />{tag}</span>)}</div>}</div>
+                <div><button className="back-button" onClick={() => { setSelected(null); activeNotesDocument.current = null; setNotes([]); setSourceLocation({ page: null, start: null, end: null }); }}><ArrowLeft size={15} />Back</button><div className="reader-title"><span className={`source-icon source-${selected.source_type}`}><SourceIcon type={selected.source_type} size={19} /></span><h1>{selected.title}</h1></div><p>{formatDate(selected.created_at)} · {selected.word_count.toLocaleString()} words · {selected.source_type}{selected.source_type === "pdf" ? ` · ${selected.page_count} pages` : ""}{selected.ocr_applied ? " · OCR" : ""}{selected.duration_seconds ? ` · ${formatTimestamp(selected.duration_seconds)}` : ""}{selected.language ? ` · ${selected.language.toUpperCase()}` : ""}</p>{(selected.collection || selected.tags.length > 0) && <div className="metadata-line">{selected.collection && <span><Folder size={12} />{selected.collection}</span>}{selected.tags.map((tag) => <span key={tag}><Tags size={12} />{tag}</span>)}</div>}</div>
                 <div className="reader-actions"><button className={`icon-button favorite-button ${selected.favorite ? "active" : ""}`} title={selected.favorite ? "Remove favorite" : "Add favorite"} aria-label={selected.favorite ? "Remove favorite" : "Add favorite"} onClick={() => toggleFavorite(selected)}><Star size={18} fill={selected.favorite ? "currentColor" : "none"} /></button><button className="icon-button edit-button" title="Edit details" aria-label="Edit document details" onClick={() => editMetadata(selected)}><Pencil size={17} /></button><button className="icon-button danger-button" title="Delete document" aria-label="Delete document" onClick={() => deleteDocument(selected)}><Trash2 size={18} /></button></div>
               </div>
               {selected.source_available && (
@@ -661,6 +726,25 @@ export default function App() {
                 <label>Voice<select value={voiceName} onChange={(event) => setVoiceName(event.target.value)}>{speechVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select></label>
                 <label>Speed <output>{rate.toFixed(1)}x</output><input type="range" min="0.6" max="1.6" step="0.1" value={rate} onChange={(event) => setRate(Number(event.target.value))} /></label>
               </div>
+              <section className="notes-panel" aria-label="Document notes">
+                <div className="notes-heading"><div><StickyNote size={16} /><h2>Notes</h2><span>{notes.length}</span></div></div>
+                <form className="note-form" onSubmit={saveNote}>
+                  <textarea value={noteDraft} onChange={(event) => setNoteDraft(event.target.value)} placeholder="Capture a takeaway, follow-up, or source note." maxLength="10000" />
+                  <div>
+                    {editingNoteId && <button type="button" className="secondary-button" onClick={() => { setEditingNoteId(null); setNoteDraft(""); }}>Cancel edit</button>}
+                    <button className="primary-button" disabled={busy || !noteDraft.trim()}>{busy ? <LoaderCircle className="spin" size={17} /> : <CheckCircle2 size={17} />}<span>{editingNoteId ? "Update note" : "Add note"}</span></button>
+                  </div>
+                </form>
+                <div className="notes-list">
+                  {notes.map((note) => (
+                    <article className="note-row" key={note.id}>
+                      <p>{note.content}</p>
+                      <div><span>{formatDate(note.updated_at)}</span><button type="button" onClick={() => editNote(note)}>Edit</button><button type="button" onClick={() => deleteNote(note)}>Delete</button></div>
+                    </article>
+                  ))}
+                  {!notes.length && <p className="empty-notes">No notes for this source yet.</p>}
+                </div>
+              </section>
               <div className="document-content">{selected.content}</div>
             </article>
           ) : answer ? (

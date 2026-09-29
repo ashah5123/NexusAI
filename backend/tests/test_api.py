@@ -79,6 +79,28 @@ class DocumentApiTest(unittest.TestCase):
         self.assertEqual(response.json(), {"removed": 1})
         self.assertFalse(source.exists())
 
+    def test_document_note_endpoints(self) -> None:
+        document = self.repository.create(
+            DocumentCreate(title="Research source", content="Evidence worth annotating.")
+        )
+
+        create_response = self.client.post(
+            f"/api/documents/{document.id}/notes",
+            json={"content": "Check this against the launch memo."},
+        )
+        note_id = create_response.json()["id"]
+        update_response = self.client.patch(
+            f"/api/documents/{document.id}/notes/{note_id}",
+            json={"content": "Confirmed by the launch memo."},
+        )
+        list_response = self.client.get(f"/api/documents/{document.id}/notes")
+        delete_response = self.client.delete(f"/api/documents/{document.id}/notes/{note_id}")
+
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(update_response.json()["content"], "Confirmed by the launch memo.")
+        self.assertEqual(list_response.json()["total"], 1)
+        self.assertEqual(delete_response.status_code, 204)
+
 
 if __name__ == "__main__":
     unittest.main()
