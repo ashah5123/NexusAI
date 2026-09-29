@@ -9,6 +9,8 @@ document or transcript aloud with local speech synthesis. Long-running OCR and t
 show progress, survive restarts, and can be cancelled or retried. Original sources open in the
 reader at cited pages or timestamps, while collections, tags, favorites, and sorting keep the
 library manageable. Reader notes and anchored highlights capture takeaways beside exact passages.
+Library questions can be scoped by collection or source type, and model answers are shown only
+when every cited evidence number can be verified against the retrieved passages.
 
 ## Stack
 

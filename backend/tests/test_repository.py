@@ -83,6 +83,23 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertEqual(passages[0]["passage"], "Maya owns the Atlas release on October 14.")
         self.assertIn("keyword evidence", warning)
 
+    def test_retrieval_respects_collection_and_source_scope(self) -> None:
+        research = self.repository.create(
+            DocumentCreate(title="Research", content="Atlas launch evidence", source_type="pdf")
+        )
+        self.repository.update(research.id, DocumentUpdate(collection="Work"))
+        personal = self.repository.create(
+            DocumentCreate(title="Personal", content="Atlas garden evidence", source_type="text")
+        )
+        self.repository.update(personal.id, DocumentUpdate(collection="Home"))
+
+        passages, _ = self.repository.retrieve(
+            "Atlas evidence", 6, FakeEmbedder(), collection="Work", source_types=["pdf"]
+        )
+
+        self.assertEqual(len(passages), 1)
+        self.assertEqual(passages[0]["id"], research.id)
+
     def test_answer_service_falls_back_to_retrieved_evidence(self) -> None:
         service = OllamaAnswerService()
         passages = [{
@@ -97,6 +114,23 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertFalse(result.generated)
         self.assertEqual(result.citations[0].document_id, "doc-1")
         self.assertIn("unavailable", result.answer)
+
+    def test_answer_service_withholds_invalid_model_citations(self) -> None:
+        service = OllamaAnswerService()
+        passages = [{
+            "id": "doc-1", "title": "Atlas notes", "source_type": "text",
+            "page_number": None, "start_seconds": None, "end_seconds": None,
+            "passage": "Maya owns the Atlas release.", "content": "Maya owns the Atlas release.",
+            "chunk_index": 0, "score": 1.0,
+        }]
+        response = BytesIO(b'{"message":{"content":"Maya owns it [9]."}}')
+
+        with patch("app.generation.urlopen", return_value=response):
+            result = service.answer("Who owns Atlas?", passages)
+
+        self.assertFalse(result.grounded)
+        self.assertIn("withheld", result.answer)
+        self.assertEqual(result.citations[0].start_offset, 0)
 
     def test_page_aware_chunks_preserve_pdf_citation(self) -> None:
         payload = DocumentCreate(

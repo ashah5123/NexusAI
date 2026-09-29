@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -23,21 +24,34 @@ class OllamaAnswerService:
         except (OSError, URLError, ValueError):
             return False
 
-    def answer(self, question: str, passages: list[dict], warning: str | None = None) -> AnswerResponse:
+    def answer(
+        self,
+        question: str,
+        passages: list[dict],
+        warning: str | None = None,
+        scope_description: str = "All documents",
+    ) -> AnswerResponse:
         started = time.perf_counter()
-        citations = [
-            Citation(
-                number=index,
-                document_id=row["id"],
-                title=row["title"],
-                source_type=row["source_type"],
-                page_number=row.get("page_number"),
-                start_seconds=row.get("start_seconds"),
-                end_seconds=row.get("end_seconds"),
-                passage=row["passage"],
+        citations = []
+        for index, row in enumerate(passages, 1):
+            document_content = row.get("content", row["passage"])
+            offset = document_content.find(row["passage"])
+            citations.append(
+                Citation(
+                    number=index,
+                    document_id=row["id"],
+                    title=row["title"],
+                    source_type=row["source_type"],
+                    page_number=row.get("page_number"),
+                    start_seconds=row.get("start_seconds"),
+                    end_seconds=row.get("end_seconds"),
+                    passage=row["passage"],
+                    chunk_index=row.get("chunk_index", 0),
+                    score=round(float(row.get("score", 0)), 6),
+                    start_offset=offset if offset >= 0 else None,
+                    end_offset=offset + len(row["passage"]) if offset >= 0 else None,
+                )
             )
-            for index, row in enumerate(passages, 1)
-        ]
         if not passages:
             return AnswerResponse(
                 question=question,
@@ -47,6 +61,8 @@ class OllamaAnswerService:
                 generated=False,
                 elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
                 warning=warning,
+                grounded=False,
+                scope_description=scope_description,
             )
 
         context = "\n\n".join(
@@ -79,8 +95,15 @@ class OllamaAnswerService:
             )
             with urlopen(request, timeout=120) as response:
                 generated = json.load(response)["message"]["content"].strip()
-            answer = generated or "I could not produce an answer from the available evidence."
-            did_generate = bool(generated)
+            cited = {int(value) for value in re.findall(r"\[(\d+)\]", generated)}
+            valid = set(range(1, len(citations) + 1))
+            if generated and cited and cited.issubset(valid):
+                answer = generated
+                did_generate = True
+            else:
+                answer = "The local model answer was withheld because it did not contain valid evidence citations. Review the retrieved passages below."
+                did_generate = False
+                warning = "The generated answer was withheld because its citations could not be verified."
         except (OSError, URLError, ValueError, KeyError):
             answer = "The local answer model is unavailable. Review the relevant evidence below."
             did_generate = False
@@ -94,4 +117,6 @@ class OllamaAnswerService:
             generated=did_generate,
             elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
             warning=warning,
+            grounded=did_generate,
+            scope_description=scope_description,
         )

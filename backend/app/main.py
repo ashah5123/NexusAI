@@ -66,7 +66,7 @@ async def lifespan(_: FastAPI):
         ingestion_worker.stop()
 
 
-app = FastAPI(title="NexusAI API", version="0.12.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.13.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -337,8 +337,23 @@ def answer_status() -> AnswerStatus:
 
 @app.post("/api/answers", response_model=AnswerResponse)
 def answer_question(payload: AnswerRequest) -> AnswerResponse:
-    passages, warning = repository.retrieve(payload.question, 6, embedding_service)
-    return answer_service.answer(payload.question, passages, warning)
+    passages, warning = repository.retrieve(
+        payload.question,
+        6,
+        embedding_service,
+        payload.document_ids,
+        payload.collection,
+        payload.source_types,
+    )
+    scope_parts = []
+    if payload.collection:
+        scope_parts.append(f'collection "{payload.collection}"')
+    if payload.source_types:
+        scope_parts.append("sources: " + ", ".join(payload.source_types))
+    if payload.document_ids:
+        scope_parts.append(f"{len(payload.document_ids)} selected document(s)")
+    scope = " · ".join(scope_parts) if scope_parts else "All documents"
+    return answer_service.answer(payload.question, passages, warning, scope)
 
 
 @app.get("/api/speech/status", response_model=SpeechStatus)

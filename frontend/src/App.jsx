@@ -124,6 +124,8 @@ export default function App() {
   const [searchMeta, setSearchMeta] = useState(null);
   const [answer, setAnswer] = useState(null);
   const [answerStatus, setAnswerStatus] = useState(null);
+  const [askCollection, setAskCollection] = useState("all");
+  const [askSourceType, setAskSourceType] = useState("all");
   const [results, setResults] = useState([]);
   const [selected, setSelected] = useState(null);
   const [showImporter, setShowImporter] = useState(false);
@@ -156,6 +158,7 @@ export default function App() {
   const [highlightColor, setHighlightColor] = useState("yellow");
   const [highlightAnnotation, setHighlightAnnotation] = useState("");
   const [editingHighlightId, setEditingHighlightId] = useState(null);
+  const [citationFocus, setCitationFocus] = useState(null);
   const completedJobs = useRef(new Set());
   const searchInput = useRef(null);
   const activeNotesDocument = useRef(null);
@@ -276,6 +279,29 @@ export default function App() {
       return new Date(right.updated_at) - new Date(left.updated_at);
     });
   }, [documents, libraryFilter, collectionFilter, sortMode]);
+  const readerHighlights = useMemo(() => {
+    if (!citationFocus) return highlights;
+    const focus = {
+      id: "citation-focus",
+      start_offset: citationFocus.start_offset,
+      end_offset: citationFocus.end_offset,
+      color: "citation",
+      annotation: "Passage cited in the answer",
+    };
+    return [focus, ...highlights.filter((item) =>
+      item.end_offset <= focus.start_offset || item.start_offset >= focus.end_offset
+    )].sort((left, right) => left.start_offset - right.start_offset);
+  }, [highlights, citationFocus]);
+
+  useEffect(() => {
+    if (!selected || !citationFocus) return;
+    window.requestAnimationFrame(() => {
+      document.querySelector('[data-highlight-id="citation-focus"]')?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    });
+  }, [selected, citationFocus, highlights]);
 
   async function runSearch(event) {
     event.preventDefault();
@@ -293,7 +319,11 @@ export default function App() {
         const data = await api("/api/answers", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question: normalized }),
+          body: JSON.stringify({
+            question: normalized,
+            collection: askCollection === "all" ? null : askCollection,
+            source_types: askSourceType === "all" ? [] : [askSourceType],
+          }),
         });
         setAnswer(data);
         setSearchMeta(null);
@@ -428,6 +458,11 @@ export default function App() {
     setHighlightDraft(null);
     setHighlightAnnotation("");
     setEditingHighlightId(null);
+    setCitationFocus(
+      location.focusStart != null && location.focusEnd != null
+        ? { start_offset: location.focusStart, end_offset: location.focusEnd }
+        : null,
+    );
     loadNotes(document.id).catch((err) => setError(err.message));
     loadHighlights(document.id).catch((err) => setError(err.message));
     setSourceLocation({
@@ -720,6 +755,8 @@ export default function App() {
         page: citation.page_number,
         start: citation.start_seconds,
         end: citation.end_seconds,
+        focusStart: citation.start_offset,
+        focusEnd: citation.end_offset,
       });
     } catch (err) {
       setError(err.message);
@@ -814,6 +851,7 @@ export default function App() {
             </div>
             <div className={`search-options ${workspaceMode === "ask" ? "ask-options" : ""}`}>
               {workspaceMode === "search" && <div className="mode-switch" aria-label="Search mode">{["hybrid", "keyword", "semantic"].map((mode) => <button type="button" key={mode} className={searchMode === mode ? "active" : ""} onClick={() => setSearchMode(mode)}>{mode}</button>)}</div>}
+              {workspaceMode === "ask" && <div className="ask-scope" aria-label="Answer scope"><label><Folder size={13} /><select value={askCollection} onChange={(event) => setAskCollection(event.target.value)}><option value="all">All collections</option>{collections.map((collection) => <option key={collection} value={collection}>{collection}</option>)}</select></label><label><FileText size={13} /><select value={askSourceType} onChange={(event) => setAskSourceType(event.target.value)}><option value="all">All source types</option><option value="text">Text</option><option value="markdown">Markdown</option><option value="pdf">PDF</option><option value="image">Images</option><option value="audio">Audio</option><option value="video">Video</option><option value="transcript">Transcripts</option></select></label></div>}
               <div className="embedding-state">
                 {embeddingStatus?.ready ? <CheckCircle2 size={14} /> : <Sparkles size={14} />}
                 <span>{embeddingStatus?.ready ? `${embeddingStatus.indexed_chunks} passages indexed` : embeddingStatus?.total_chunks ? `${embeddingStatus.pending_chunks} passages need vectors` : "Add documents to enable semantic search"}</span>
@@ -900,15 +938,16 @@ export default function App() {
                   {!notes.length && <p className="empty-notes">No notes for this source yet.</p>}
                 </div>
               </section>
-              <AnnotatedContent content={selected.content} highlights={highlights} contentRef={documentContentRef} onSelect={captureHighlightSelection} onHighlightClick={jumpToHighlight} />
+              {citationFocus && <div className="citation-focus-banner"><CheckCircle2 size={15} />Showing the exact passage cited in your answer.<button type="button" onClick={() => setCitationFocus(null)}>Clear focus</button></div>}
+              <AnnotatedContent content={selected.content} highlights={readerHighlights} contentRef={documentContentRef} onSelect={captureHighlightSelection} onHighlightClick={(highlight) => highlight.id !== "citation-focus" && jumpToHighlight(highlight)} />
             </article>
           ) : answer ? (
             <section className="answer-view view-enter">
-              <div className="answer-header"><p className="eyebrow">Grounded answer</p><h1>{answer.question}</h1><span>{answer.generated ? `Generated locally with ${answer.model}` : "Evidence mode"} · {answer.elapsed_ms} ms</span></div>
+              <div className="answer-header"><p className="eyebrow">Grounded answer</p><h1>{answer.question}</h1><span>{answer.grounded ? "Citations verified" : answer.generated ? `Generated locally with ${answer.model}` : "Evidence mode"} · {answer.scope_description} · {answer.elapsed_ms} ms</span></div>
               {answer.warning && <div className="search-warning">{answer.warning}</div>}
               <div className="answer-copy">{answer.answer}</div>
               <div className="evidence-heading"><h2>Sources</h2><span>{answer.citations.length} passages</span></div>
-              <div className="evidence-list">{answer.citations.map((citation) => <button key={`${citation.document_id}-${citation.number}`} className="evidence-row" onClick={() => openCitation(citation)}><span className="citation-number">{citation.number}</span><span className="evidence-copy"><strong>{citation.title}</strong><small>{citation.source_type}{citation.page_number ? ` · Page ${citation.page_number}` : ""}{citation.start_seconds != null ? ` · ${formatTimestamp(citation.start_seconds)} – ${formatTimestamp(citation.end_seconds)}` : ""}</small><span>{citation.passage}</span></span><ArrowRight size={17} /></button>)}</div>
+              <div className="evidence-list">{answer.citations.map((citation) => <button key={`${citation.document_id}-${citation.number}`} className="evidence-row" onClick={() => openCitation(citation)}><span className="citation-number">{citation.number}</span><span className="evidence-copy"><strong>{citation.title}</strong><small>{citation.source_type}{citation.page_number ? ` · Page ${citation.page_number}` : ""}{citation.start_seconds != null ? ` · ${formatTimestamp(citation.start_seconds)} – ${formatTimestamp(citation.end_seconds)}` : ""}{citation.start_offset != null && !citation.page_number && citation.start_seconds == null ? " · Exact passage" : ""} · score {citation.score.toFixed(3)}</small><span>{citation.passage}</span></span><ArrowRight size={17} /></button>)}</div>
             </section>
           ) : (
             <section className="results-view view-enter">

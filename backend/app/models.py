@@ -227,6 +227,11 @@ class SearchResponse(BaseModel):
 
 class AnswerRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500)
+    document_ids: list[str] = Field(default_factory=list, max_length=100)
+    collection: str | None = Field(default=None, max_length=120)
+    source_types: list[Literal["text", "markdown", "pdf", "image", "audio", "video", "transcript"]] = Field(
+        default_factory=list, max_length=6
+    )
 
     @field_validator("question")
     @classmethod
@@ -235,6 +240,11 @@ class AnswerRequest(BaseModel):
         if not value:
             raise ValueError("must not be blank")
         return value
+
+    @field_validator("collection")
+    @classmethod
+    def normalize_collection(cls, value: str | None) -> str | None:
+        return value.strip() or None if value else None
 
 
 class Citation(BaseModel):
@@ -246,6 +256,10 @@ class Citation(BaseModel):
     start_seconds: float | None
     end_seconds: float | None
     passage: str
+    chunk_index: int
+    score: float
+    start_offset: int | None
+    end_offset: int | None
 
 
 class AnswerResponse(BaseModel):
@@ -256,6 +270,8 @@ class AnswerResponse(BaseModel):
     generated: bool
     elapsed_ms: float
     warning: str | None = None
+    grounded: bool = False
+    scope_description: str = "All documents"
 
 
 class AnswerStatus(BaseModel):

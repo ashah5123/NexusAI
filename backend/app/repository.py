@@ -735,10 +735,37 @@ class DocumentRepository:
             )
             connection.commit()
 
-    def _keyword_candidates(self, fts_query: str, limit: int) -> list[dict]:
+    @staticmethod
+    def _scope_sql(
+        document_ids: list[str] | None,
+        collection: str | None,
+        source_types: list[str] | None,
+    ) -> tuple[str, list]:
+        clauses: list[str] = []
+        params: list = []
+        if document_ids:
+            clauses.append(f"d.id IN ({','.join('?' for _ in document_ids)})")
+            params.extend(document_ids)
+        if collection:
+            clauses.append("d.collection_name = ?")
+            params.append(collection)
+        if source_types:
+            clauses.append(f"d.source_type IN ({','.join('?' for _ in source_types)})")
+            params.extend(source_types)
+        return (" AND " + " AND ".join(clauses) if clauses else ""), params
+
+    def _keyword_candidates(
+        self,
+        fts_query: str,
+        limit: int,
+        document_ids: list[str] | None = None,
+        collection: str | None = None,
+        source_types: list[str] | None = None,
+    ) -> list[dict]:
+        scope_sql, scope_params = self._scope_sql(document_ids, collection, source_types)
         with closing(self.connect()) as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
                     c.start_seconds, c.end_seconds,
                     c.content AS passage,
@@ -747,11 +774,11 @@ class DocumentRepository:
                 FROM chunks_fts
                 JOIN chunks c ON c.id = chunks_fts.rowid
                 JOIN documents d ON d.id = c.document_id
-                WHERE chunks_fts MATCH ?
+                WHERE chunks_fts MATCH ?{scope_sql}
                 ORDER BY score DESC
                 LIMIT ?
                 """,
-                (fts_query, limit),
+                (fts_query, *scope_params, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -760,16 +787,20 @@ class DocumentRepository:
         query_vector: np.ndarray,
         model: str,
         limit: int,
+        document_ids: list[str] | None = None,
+        collection: str | None = None,
+        source_types: list[str] | None = None,
     ) -> list[dict]:
+        scope_sql, scope_params = self._scope_sql(document_ids, collection, source_types)
         with closing(self.connect()) as connection:
             rows = connection.execute(
-                """SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
+                f"""SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
                     c.start_seconds, c.end_seconds,
                     c.content AS passage, c.embedding
                 FROM chunks c
                 JOIN documents d ON d.id = c.document_id
-                WHERE c.embedding IS NOT NULL AND c.embedding_model = ?""",
-                (model,),
+                WHERE c.embedding IS NOT NULL AND c.embedding_model = ?{scope_sql}""",
+                (model, *scope_params),
             ).fetchall()
 
         query_norm = float(np.linalg.norm(query_vector)) or 1.0
@@ -800,21 +831,32 @@ class DocumentRepository:
         ordered = sorted(fused, key=lambda passage_id: scores[passage_id], reverse=True)[:limit]
         return [{**fused[passage_id], "score": scores[passage_id]} for passage_id in ordered]
 
-    def retrieve(self, query: str, limit: int, embedder) -> tuple[list[dict], str | None]:
+    def retrieve(
+        self,
+        query: str,
+        limit: int,
+        embedder,
+        document_ids: list[str] | None = None,
+        collection: str | None = None,
+        source_types: list[str] | None = None,
+    ) -> tuple[list[dict], str | None]:
         terms = TOKEN_RE.findall(query)
         fts_query = " OR ".join(f'"{term}"' for term in terms)
         if not fts_query:
             return [], None
 
         candidate_limit = max(limit * 3, 30)
-        keyword = self._keyword_candidates(fts_query, candidate_limit)
+        keyword = self._keyword_candidates(
+            fts_query, candidate_limit, document_ids, collection, source_types
+        )
         semantic: list[dict] = []
         warning = None
         status = self.embedding_status(embedder.model_name, embedder.loaded)
         if status.indexed_chunks:
             try:
                 semantic = self._semantic_candidates(
-                    embedder.embed_query(query), embedder.model_name, candidate_limit
+                    embedder.embed_query(query), embedder.model_name, candidate_limit,
+                    document_ids, collection, source_types
                 )
             except Exception:
                 warning = "Semantic retrieval is unavailable; the answer uses keyword evidence."
