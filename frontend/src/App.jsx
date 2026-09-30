@@ -18,6 +18,7 @@ import {
   Highlighter,
   LayoutList,
   LoaderCircle,
+  LogOut,
   Menu,
   MessageSquareText,
   Pencil,
@@ -33,6 +34,7 @@ import {
   Tags,
   Trash2,
   UploadCloud,
+  UsersRound,
   Volume2,
   X,
 } from "lucide-react";
@@ -40,7 +42,7 @@ import {
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 async function api(path, options) {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, credentials: "include" });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.detail || `Request failed (${response.status})`);
@@ -49,7 +51,7 @@ async function api(path, options) {
 }
 
 async function apiBlob(path, options) {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, credentials: "include" });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.detail || `Request failed (${response.status})`);
@@ -120,6 +122,10 @@ function SourceIcon({ type, size = 17 }) {
 }
 
 export default function App() {
+  const [session, setSession] = useState(null);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authMode, setAuthMode] = useState("login");
+  const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
   const [apiStatus, setApiStatus] = useState("checking");
   const [documents, setDocuments] = useState([]);
   const [query, setQuery] = useState("");
@@ -178,6 +184,7 @@ export default function App() {
   const searchInput = useRef(null);
   const activeNotesDocument = useRef(null);
   const documentContentRef = useRef(null);
+  const canEdit = session?.workspace.role !== "viewer";
 
   const loadDocuments = useCallback(async () => {
     const data = await api("/api/documents");
@@ -214,18 +221,24 @@ export default function App() {
     if (activeNotesDocument.current === documentId) setHighlights(data.items);
   }, []);
 
+  const loadWorkspaceData = useCallback(async () => {
+    await Promise.all([
+      loadDocuments(), loadEmbeddingStatus(), loadIngestionJobs(), loadSavedViews(),
+      loadConversations(),
+      api("/api/answers/status").then(setAnswerStatus),
+      api("/api/speech/status").then(setSpeechStatus),
+    ]);
+  }, [loadDocuments, loadEmbeddingStatus, loadIngestionJobs, loadSavedViews, loadConversations]);
+
   useEffect(() => {
     api("/health")
       .then((data) => setApiStatus(data.database === "connected" ? "online" : "degraded"))
       .catch(() => setApiStatus("offline"));
-    loadDocuments().catch((err) => setError(err.message));
-    loadEmbeddingStatus().catch((err) => setError(err.message));
-    loadIngestionJobs().catch((err) => setError(err.message));
-    loadSavedViews().catch((err) => setError(err.message));
-    loadConversations().catch((err) => setError(err.message));
-    api("/api/answers/status").then(setAnswerStatus).catch(() => setAnswerStatus(null));
-    api("/api/speech/status").then(setSpeechStatus).catch(() => setSpeechStatus(null));
-  }, [loadDocuments, loadEmbeddingStatus, loadIngestionJobs, loadSavedViews, loadConversations]);
+    api("/api/auth/me")
+      .then(async (data) => { setSession(data); await loadWorkspaceData(); })
+      .catch(() => setSession(null))
+      .finally(() => setAuthChecking(false));
+  }, [loadWorkspaceData]);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("nexusai-library-filters");
@@ -1020,6 +1033,97 @@ export default function App() {
     }
   }
 
+  function clearWorkspaceState() {
+    setDocuments([]); setResults([]); setSelected(null); setSavedViews([]);
+    setConversations([]); setConversationMessages([]); setAnswer(null);
+    setActiveConversationId(""); setActiveViewId(""); setIngestionJobs([]);
+    setSearchMeta(null); setNotes([]); setHighlights([]); setError("");
+  }
+
+  async function submitAuth(event) {
+    event.preventDefault();
+    setBusy(true); setError("");
+    try {
+      const payload = authMode === "register" ? authForm : { email: authForm.email, password: authForm.password };
+      const data = await api(`/api/auth/${authMode}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      setSession(data);
+      setAuthForm({ name: "", email: "", password: "" });
+      await loadWorkspaceData();
+    } catch (err) { setError(err.message); }
+    finally { setBusy(false); }
+  }
+
+  async function switchActiveWorkspace(workspaceId) {
+    if (!workspaceId || workspaceId === session.workspace.id) return;
+    setBusy(true);
+    try {
+      const data = await api("/api/auth/workspaces/switch", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspace_id: workspaceId }),
+      });
+      clearWorkspaceState();
+      setSession(data);
+      await loadWorkspaceData();
+    } catch (err) { setError(err.message); }
+    finally { setBusy(false); }
+  }
+
+  async function createNewWorkspace() {
+    const name = window.prompt("Workspace name");
+    if (!name?.trim()) return;
+    try {
+      const created = await api("/api/auth/workspaces", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+      });
+      const current = await api("/api/auth/me");
+      setSession(current);
+      await switchActiveWorkspace(created.id);
+    } catch (err) { setError(err.message); }
+  }
+
+  async function inviteMember() {
+    const email = window.prompt("Email to invite");
+    if (!email?.trim()) return;
+    const role = window.confirm("Give this member editor access? Select Cancel for viewer access.") ? "editor" : "viewer";
+    try {
+      const invitation = await api("/api/auth/invitations", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, role }),
+      });
+      await navigator.clipboard?.writeText(invitation.token);
+      window.prompt("Share this invitation token securely. It expires in 7 days.", invitation.token);
+    } catch (err) { setError(err.message); }
+  }
+
+  async function acceptWorkspaceInvitation() {
+    const token = window.prompt("Paste invitation token");
+    if (!token?.trim()) return;
+    try {
+      const data = await api("/api/auth/invitations/accept", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }),
+      });
+      clearWorkspaceState();
+      setSession(data);
+      await loadWorkspaceData();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function logout() {
+    try { await api("/api/auth/logout", { method: "POST" }); } catch { /* Clear local state regardless. */ }
+    clearWorkspaceState();
+    setSession(null);
+  }
+
+  if (authChecking) {
+    return <main className="auth-shell"><div className="auth-card"><span className="brand-mark">N</span><LoaderCircle className="spin" size={24} /><p>Opening your workspace…</p></div></main>;
+  }
+
+  if (!session) {
+    return <main className="auth-shell"><form className="auth-card" onSubmit={submitAuth}><span className="brand-mark">N</span><div><p className="eyebrow">Private knowledge workspace</p><h1>{authMode === "login" ? "Welcome back" : "Create your account"}</h1></div>{error && <div className="auth-error">{error}</div>}{authMode === "register" && <label>Name<input required maxLength="120" autoComplete="name" value={authForm.name} onChange={(event) => setAuthForm({ ...authForm, name: event.target.value })} /></label>}<label>Email<input required type="email" autoComplete="email" value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} /></label><label>Password<input required minLength={authMode === "register" ? 10 : 1} type="password" autoComplete={authMode === "register" ? "new-password" : "current-password"} value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} /></label><button className="primary-button" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : authMode === "login" ? "Sign in" : "Create account"}</button><button type="button" className="auth-switch" onClick={() => { setAuthMode(authMode === "login" ? "register" : "login"); setError(""); }}>{authMode === "login" ? "Need an account? Register" : "Already registered? Sign in"}</button><small>Passwords are hashed locally. Your library remains in the selected workspace.</small></form></main>;
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -1038,8 +1142,16 @@ export default function App() {
             {!!activeJobs && <span>{activeJobs}</span>}
           </button>
         )}
+        <div className="workspace-account">
+          <UsersRound size={15} />
+          <select aria-label="Active workspace" value={session.workspace.id} onChange={(event) => switchActiveWorkspace(event.target.value)}>{session.workspaces.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.role}</option>)}</select>
+          <button className="icon-button" title="Create workspace" aria-label="Create workspace" onClick={createNewWorkspace}><Plus size={15} /></button>
+          {session.workspace.role === "owner" && <button className="icon-button" title="Invite member" aria-label="Invite member" onClick={inviteMember}><UsersRound size={15} /></button>}
+          <button className="icon-button" title="Accept invitation" aria-label="Accept invitation" onClick={acceptWorkspaceInvitation}><CheckCircle2 size={15} /></button>
+          <button className="icon-button" title={`Sign out ${session.user.email}`} aria-label="Sign out" onClick={logout}><LogOut size={15} /></button>
+        </div>
         <div className={`status status-${apiStatus}`} title={`Service ${apiStatus}`}><span className="status-dot" />{apiStatus}</div>
-        <button className="primary-button add-button" onClick={() => setShowImporter(true)}><Plus size={17} /><span>Add document</span></button>
+        {canEdit && <button className="primary-button add-button" onClick={() => setShowImporter(true)}><Plus size={17} /><span>Add document</span></button>}
       </header>
 
       <main className="workspace">
@@ -1062,8 +1174,8 @@ export default function App() {
           </div>
           <div className="saved-view-controls">
             <label><Bookmark size={14} /><select aria-label="Saved smart view" value={activeViewId} onChange={(event) => applySavedView(event.target.value)}><option value="">Smart views</option>{savedViews.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}</select></label>
-            <button title="Save current filters" aria-label="Save current filters" onClick={saveCurrentView}><Plus size={14} /></button>
-            {activeViewId && <button title="Delete saved view" aria-label="Delete saved view" onClick={removeSavedView}><Trash2 size={13} /></button>}
+            {canEdit && <button title="Save current filters" aria-label="Save current filters" onClick={saveCurrentView}><Plus size={14} /></button>}
+            {canEdit && activeViewId && <button title="Delete saved view" aria-label="Delete saved view" onClick={removeSavedView}><Trash2 size={13} /></button>}
           </div>
           <div className="library-controls">
             <label><Folder size={14} /><select aria-label="Filter by collection" value={collectionFilter} onChange={(event) => setCollectionFilter(event.target.value)}><option value="all">All collections</option>{collections.map((collection) => <option key={collection} value={collection}>{collection}</option>)}</select></label>
@@ -1072,10 +1184,10 @@ export default function App() {
             <select aria-label="Filter by date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)}><option value="all">Any date</option><option value="7d">7 days</option><option value="30d">30 days</option><option value="year">1 year</option></select>
           </div>
           {!!tagFilters.length && <div className="tag-filter-list">{tagFilters.map((tag) => <button key={tag} onClick={() => setTagFilters((current) => current.filter((item) => item !== tag))}>{tag}<X size={11} /></button>)}</div>}
-          <div className="organize-actions">
+          {canEdit && <div className="organize-actions">
             {collectionFilter !== "all" && <><button onClick={renameCurrentCollection}><Pencil size={12} />Rename</button><button onClick={clearCurrentCollection}><Trash2 size={12} />Remove</button></>}
             <button className={bulkMode ? "active" : ""} onClick={() => { setBulkMode((current) => !current); setSelectedDocumentIds([]); }}><CheckSquare size={12} />{bulkMode ? "Done" : "Select"}</button>
-          </div>
+          </div>}
           {bulkMode && <div className="bulk-bar"><button onClick={() => setSelectedDocumentIds(filteredLibrary.map((document) => document.id))}>Select all</button><span>{selectedDocumentIds.length} selected</span><button className="bulk-apply" disabled={!selectedDocumentIds.length} onClick={organizeSelected}>Organize</button></div>}
           <nav className="document-nav" aria-label="Document library">
             {filteredLibrary.map((document) => (
@@ -1102,7 +1214,7 @@ export default function App() {
               <Search className="search-leading" size={19} />
               <input ref={searchInput} id="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={workspaceMode === "ask" ? "Ask a question answered from your documents" : "Try a phrase, topic, or exact term"} />
               {query && <button type="button" className="clear-button" title="Clear query" aria-label="Clear query" onClick={() => { setQuery(""); setSearchMeta(null); setAnswer(null); searchInput.current?.focus(); }}><X size={17} /></button>}
-              <button className="search-button" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : workspaceMode === "ask" ? <Sparkles size={17} /> : <Search size={17} />}<span>{busy ? "Working" : workspaceMode === "ask" ? "Ask" : "Search"}</span></button>
+              <button className="search-button" disabled={busy || (workspaceMode === "ask" && !canEdit)}>{busy ? <LoaderCircle className="spin" size={17} /> : workspaceMode === "ask" ? <Sparkles size={17} /> : <Search size={17} />}<span>{busy ? "Working" : workspaceMode === "ask" ? canEdit ? "Ask" : "Read only" : "Search"}</span></button>
             </div>
             <div className={`search-options ${workspaceMode === "ask" ? "ask-options" : ""}`}>
               {workspaceMode === "search" && <div className="mode-switch" aria-label="Search mode">{["hybrid", "keyword", "semantic"].map((mode) => <button type="button" key={mode} className={searchMode === mode ? "active" : ""} onClick={() => setSearchMode(mode)}>{mode}</button>)}</div>}
@@ -1110,7 +1222,7 @@ export default function App() {
               <div className="embedding-state">
                 {embeddingStatus?.ready ? <CheckCircle2 size={14} /> : <Sparkles size={14} />}
                 <span>{embeddingStatus?.ready ? `${embeddingStatus.indexed_chunks} passages indexed` : embeddingStatus?.total_chunks ? `${embeddingStatus.pending_chunks} passages need vectors` : "Add documents to enable semantic search"}</span>
-                {!!embeddingStatus?.total_chunks && !embeddingStatus.ready && <button type="button" onClick={enableSemanticSearch} disabled={indexing}>{indexing ? "Indexing locally" : "Enable semantic search"}</button>}
+                {canEdit && !!embeddingStatus?.total_chunks && !embeddingStatus.ready && <button type="button" onClick={enableSemanticSearch} disabled={indexing}>{indexing ? "Indexing locally" : "Enable semantic search"}</button>}
               </div>
             </div>
           </form>
@@ -1118,8 +1230,8 @@ export default function App() {
           {workspaceMode === "ask" && (
             <div className="conversation-bar">
               <div><MessageSquareText size={14} /><select aria-label="Conversation history" value={activeConversationId} onChange={(event) => openConversation(event.target.value)}><option value="">New conversation</option>{conversations.map((conversation) => <option key={conversation.id} value={conversation.id}>{conversation.title}</option>)}</select></div>
-              <button type="button" onClick={newConversation}><Plus size={13} />New</button>
-              {activeConversationId && <><button type="button" onClick={renameConversation}><Pencil size={13} />Rename</button><button type="button" className="conversation-delete" onClick={removeConversation}><Trash2 size={13} />Delete</button></>}
+              {canEdit && <button type="button" onClick={newConversation}><Plus size={13} />New</button>}
+              {canEdit && activeConversationId && <><button type="button" onClick={renameConversation}><Pencil size={13} />Rename</button><button type="button" className="conversation-delete" onClick={removeConversation}><Trash2 size={13} />Delete</button></>}
             </div>
           )}
 
@@ -1132,8 +1244,8 @@ export default function App() {
                     <span className={`source-icon source-${job.source_type}`}><SourceIcon type={job.source_type} /></span>
                     <div className="job-copy"><div><strong>{job.title}</strong><span>{job.stage}</span></div><div className="job-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={job.progress}><span style={{ width: `${job.progress}%` }} /></div>{job.error && <small>{job.error}</small>}</div>
                     <span className="job-status">{job.status}</span>
-                    {["queued", "running"].includes(job.status) && <button className="icon-button job-action" type="button" title="Cancel import" aria-label="Cancel import" onClick={() => updateIngestionJob(job, "cancel")}><Square size={14} /></button>}
-                    {["failed", "cancelled"].includes(job.status) && <button className="icon-button job-action" type="button" title="Retry import" aria-label="Retry import" onClick={() => updateIngestionJob(job, "retry")}><RefreshCw size={15} /></button>}
+                    {canEdit && ["queued", "running"].includes(job.status) && <button className="icon-button job-action" type="button" title="Cancel import" aria-label="Cancel import" onClick={() => updateIngestionJob(job, "cancel")}><Square size={14} /></button>}
+                    {canEdit && ["failed", "cancelled"].includes(job.status) && <button className="icon-button job-action" type="button" title="Retry import" aria-label="Retry import" onClick={() => updateIngestionJob(job, "retry")}><RefreshCw size={15} /></button>}
                     {job.status === "completed" && <CheckCircle2 className="job-complete" size={17} />}
                   </div>
                 ))}
@@ -1147,7 +1259,7 @@ export default function App() {
             <article className="reader view-enter">
               <div className="reader-header">
                 <div><button className="back-button" onClick={() => { setSelected(null); activeNotesDocument.current = null; setNotes([]); setSourceLocation({ page: null, start: null, end: null }); }}><ArrowLeft size={15} />Back</button><div className="reader-title"><span className={`source-icon source-${selected.source_type}`}><SourceIcon type={selected.source_type} size={19} /></span><h1>{selected.title}</h1></div><p>{formatDate(selected.created_at)} · {selected.word_count.toLocaleString()} words · {selected.source_type}{selected.source_type === "pdf" ? ` · ${selected.page_count} pages` : ""}{selected.ocr_applied ? " · OCR" : ""}{selected.duration_seconds ? ` · ${formatTimestamp(selected.duration_seconds)}` : ""}{selected.language ? ` · ${selected.language.toUpperCase()}` : ""}</p>{(selected.collection || selected.tags.length > 0) && <div className="metadata-line">{selected.collection && <span><Folder size={12} />{selected.collection}</span>}{selected.tags.map((tag) => <span key={tag}><Tags size={12} />{tag}</span>)}</div>}</div>
-                <div className="reader-actions"><button className={`icon-button favorite-button ${selected.favorite ? "active" : ""}`} title={selected.favorite ? "Remove favorite" : "Add favorite"} aria-label={selected.favorite ? "Remove favorite" : "Add favorite"} onClick={() => toggleFavorite(selected)}><Star size={18} fill={selected.favorite ? "currentColor" : "none"} /></button><button className="icon-button edit-button" title="Edit details" aria-label="Edit document details" onClick={() => editMetadata(selected)}><Pencil size={17} /></button><button className="icon-button danger-button" title="Delete document" aria-label="Delete document" onClick={() => deleteDocument(selected)}><Trash2 size={18} /></button></div>
+                {canEdit && <div className="reader-actions"><button className={`icon-button favorite-button ${selected.favorite ? "active" : ""}`} title={selected.favorite ? "Remove favorite" : "Add favorite"} aria-label={selected.favorite ? "Remove favorite" : "Add favorite"} onClick={() => toggleFavorite(selected)}><Star size={18} fill={selected.favorite ? "currentColor" : "none"} /></button><button className="icon-button edit-button" title="Edit details" aria-label="Edit document details" onClick={() => editMetadata(selected)}><Pencil size={17} /></button><button className="icon-button danger-button" title="Delete document" aria-label="Delete document" onClick={() => deleteDocument(selected)}><Trash2 size={18} /></button></div>}
               </div>
               {selected.source_available && (
                 <section className={`source-viewer viewer-${selected.source_type}`}>
@@ -1165,7 +1277,7 @@ export default function App() {
               </div>
               <section className="highlights-panel" aria-label="Document highlights">
                 <div className="notes-heading"><div><Highlighter size={16} /><h2>Highlights</h2><span>{highlights.length}</span></div><div className="highlight-heading-actions"><small>Select text below to highlight it</small><button type="button" title="Export notes and highlights" onClick={exportAnnotations}><Download size={14} />Export</button></div></div>
-                {highlightDraft && (
+                {canEdit && highlightDraft && (
                   <form className="highlight-form" onSubmit={saveHighlight}>
                     <blockquote>{highlightDraft.selected_text}</blockquote>
                     <div className="highlight-fields">
@@ -1184,13 +1296,13 @@ export default function App() {
               </section>
               <section className="notes-panel" aria-label="Document notes">
                 <div className="notes-heading"><div><StickyNote size={16} /><h2>Notes</h2><span>{notes.length}</span></div></div>
-                <form className="note-form" onSubmit={saveNote}>
+                {canEdit && <form className="note-form" onSubmit={saveNote}>
                   <textarea value={noteDraft} onChange={(event) => setNoteDraft(event.target.value)} placeholder="Capture a takeaway, follow-up, or source note." maxLength="10000" />
                   <div>
                     {editingNoteId && <button type="button" className="secondary-button" onClick={() => { setEditingNoteId(null); setNoteDraft(""); }}>Cancel edit</button>}
                     <button className="primary-button" disabled={busy || !noteDraft.trim()}>{busy ? <LoaderCircle className="spin" size={17} /> : <CheckCircle2 size={17} />}<span>{editingNoteId ? "Update note" : "Add note"}</span></button>
                   </div>
-                </form>
+                </form>}
                 <div className="notes-list">
                   {notes.map((note) => (
                     <article className="note-row" key={note.id}>
@@ -1202,7 +1314,7 @@ export default function App() {
                 </div>
               </section>
               {citationFocus && <div className="citation-focus-banner"><CheckCircle2 size={15} />Showing the exact passage cited in your answer.<button type="button" onClick={() => setCitationFocus(null)}>Clear focus</button></div>}
-              <AnnotatedContent content={selected.content} highlights={readerHighlights} contentRef={documentContentRef} onSelect={captureHighlightSelection} onHighlightClick={(highlight) => highlight.id !== "citation-focus" && jumpToHighlight(highlight)} />
+              <AnnotatedContent content={selected.content} highlights={readerHighlights} contentRef={documentContentRef} onSelect={canEdit ? captureHighlightSelection : undefined} onHighlightClick={(highlight) => highlight.id !== "citation-focus" && jumpToHighlight(highlight)} />
             </article>
           ) : answer ? (
             <section className="answer-view view-enter">
@@ -1226,7 +1338,7 @@ export default function App() {
                 {searchMeta?.warning && <div className="search-warning">{searchMeta.warning}</div>}
                 {visibleDocuments.map((document) => <article className="result-row" key={document.id}><span className={`source-icon source-${document.source_type}`}><SourceIcon type={document.source_type} size={19} /></span><button className="result-main" onClick={() => openDocument(document)}><div className="result-meta"><span>{document.source_type}</span>{document.favorite && <span><Star size={9} fill="currentColor" />Favorite</span>}{document.collection && <span>{document.collection}</span>}<span>{formatDate(document.created_at)}</span><span>{document.word_count.toLocaleString()} words</span>{document.page_number && <span>Page {document.page_number}</span>}{document.ocr_applied && <span>OCR</span>}{document.start_seconds != null && <span>{formatTimestamp(document.start_seconds)} – {formatTimestamp(document.end_seconds)}</span>}</div><h2>{document.title}</h2><p>{document.snippet ? <HighlightedSnippet value={document.snippet} /> : document.content.slice(0, 220)}</p></button><button className="icon-button read-quick" title="Read aloud" aria-label={`Read ${document.title} aloud`} onClick={() => speak(document)}><Volume2 size={17} /></button><button className="icon-button open-result" title="Open document" aria-label={`Open ${document.title}`} onClick={() => openDocument(document)}><ArrowRight size={18} /></button></article>)}
               </div>
-              {!visibleDocuments.length && <div className="empty-state"><div className="empty-icon">{searchMeta ? <Search size={27} /> : <BookOpen size={27} />}</div><h2>{searchMeta ? "No matching passages" : workspaceMode === "ask" ? "Ask across your library" : "Build your local library"}</h2><p>{searchMeta ? "Try fewer or more specific terms." : workspaceMode === "ask" ? "Your answer will stay grounded in indexed documents and show its sources." : "Add documents or media to make them searchable and readable aloud."}</p>{!searchMeta && <button className="primary-button" onClick={() => setShowImporter(true)}><Plus size={17} />Add first document</button>}</div>}
+              {!visibleDocuments.length && <div className="empty-state"><div className="empty-icon">{searchMeta ? <Search size={27} /> : <BookOpen size={27} />}</div><h2>{searchMeta ? "No matching passages" : workspaceMode === "ask" ? "Ask across your library" : "Build your local library"}</h2><p>{searchMeta ? "Try fewer or more specific terms." : workspaceMode === "ask" ? "Your answer will stay grounded in indexed documents and show its sources." : canEdit ? "Add documents or media to make them searchable and readable aloud." : "This workspace has no documents yet. Ask an owner or editor to add sources."}</p>{canEdit && !searchMeta && <button className="primary-button" onClick={() => setShowImporter(true)}><Plus size={17} />Add first document</button>}</div>}
             </section>
           )}
         </section>

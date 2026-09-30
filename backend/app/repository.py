@@ -86,8 +86,52 @@ class DocumentRepository:
         with closing(self.connect()) as connection:
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    password_salt TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS workspace_members (
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL CHECK(role IN ('owner', 'editor', 'viewer')),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, user_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS workspace_invitations (
+                    token_hash TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    email TEXT NOT NULL COLLATE NOCASE,
+                    role TEXT NOT NULL CHECK(role IN ('editor', 'viewer')),
+                    expires_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    accepted_at TEXT
+                );
+
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL DEFAULT 'local',
                     title TEXT NOT NULL,
                     content TEXT NOT NULL,
                     source_type TEXT NOT NULL,
@@ -122,6 +166,7 @@ class DocumentRepository:
 
                 CREATE TABLE IF NOT EXISTS ingestion_jobs (
                     id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL DEFAULT 'local',
                     title TEXT NOT NULL,
                     source_type TEXT NOT NULL,
                     source_name TEXT NOT NULL,
@@ -169,6 +214,7 @@ class DocumentRepository:
 
                 CREATE TABLE IF NOT EXISTS saved_views (
                     id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL DEFAULT 'local',
                     name TEXT NOT NULL,
                     query TEXT NOT NULL DEFAULT '',
                     collection_name TEXT,
@@ -183,6 +229,7 @@ class DocumentRepository:
 
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL DEFAULT 'local',
                     title TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -228,7 +275,17 @@ class DocumentRepository:
                 END;
                 """
             )
+            now = datetime.now(UTC).isoformat()
+            connection.execute(
+                """INSERT OR IGNORE INTO workspaces (id, name, created_by, created_at)
+                VALUES ('local', 'Local workspace', NULL, ?)""",
+                (now,),
+            )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
+            if "workspace_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE documents ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'local'"
+                )
             if "page_count" not in columns:
                 connection.execute(
                     "ALTER TABLE documents ADD COLUMN page_count INTEGER NOT NULL DEFAULT 1"
@@ -253,6 +310,33 @@ class DocumentRepository:
                 )
             if "source_path" not in columns:
                 connection.execute("ALTER TABLE documents ADD COLUMN source_path TEXT")
+            job_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(ingestion_jobs)")
+            }
+            if "workspace_id" not in job_columns:
+                connection.execute(
+                    "ALTER TABLE ingestion_jobs ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'local'"
+                )
+            view_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(saved_views)")
+            }
+            if "workspace_id" not in view_columns:
+                connection.execute(
+                    "ALTER TABLE saved_views ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'local'"
+                )
+            conversation_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(conversations)")
+            }
+            if "workspace_id" not in conversation_columns:
+                connection.execute(
+                    "ALTER TABLE conversations ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'local'"
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS documents_workspace_created ON documents(workspace_id, created_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS ingestion_jobs_workspace_created ON ingestion_jobs(workspace_id, created_at)"
+            )
             connection.execute(
                 """UPDATE documents SET source_path = (
                     SELECT input_path FROM ingestion_jobs
@@ -367,6 +451,7 @@ class DocumentRepository:
         language: str | None = None,
         document_id: str | None = None,
         source_path: Path | None = None,
+        workspace_id: str = "local",
     ) -> DocumentRead:
         now = datetime.now(UTC).isoformat()
         document_id = document_id or str(uuid4())
@@ -380,11 +465,12 @@ class DocumentRepository:
         with closing(self.connect()) as connection:
             connection.execute(
                 """INSERT INTO documents
-                (id, title, content, source_type, source_name, word_count, page_count, ocr_applied,
+                (id, workspace_id, title, content, source_type, source_name, word_count, page_count, ocr_applied,
                  duration_seconds, language, source_path, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     document_id,
+                    workspace_id,
                     payload.title,
                     payload.content,
                     payload.source_type,
@@ -401,7 +487,7 @@ class DocumentRepository:
             )
             self._insert_chunks(connection, document_id, payload.title, sections)
             connection.commit()
-        document = self.get(document_id)
+        document = self.get(document_id, workspace_id)
         if document is None:
             raise RuntimeError("Document was not persisted")
         return document
@@ -418,14 +504,15 @@ class DocumentRepository:
         source_type: str,
         source_name: str,
         input_path: Path,
+        workspace_id: str = "local",
     ) -> IngestionJob:
         now = datetime.now(UTC).isoformat()
         with closing(self.connect()) as connection:
             connection.execute(
                 """INSERT INTO ingestion_jobs
-                (id, title, source_type, source_name, input_path, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (job_id, title, source_type, source_name, str(input_path), now, now),
+                (id, workspace_id, title, source_type, source_name, input_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, workspace_id, title, source_type, source_name, str(input_path), now, now),
             )
             connection.commit()
         job = self.get_ingestion_job(job_id)
@@ -447,12 +534,15 @@ class DocumentRepository:
             ).fetchone()
         return Path(row["input_path"]) if row else None
 
-    def list_ingestion_jobs(self, limit: int = 20) -> IngestionJobList:
+    def list_ingestion_jobs(self, limit: int = 20, workspace_id: str = "local") -> IngestionJobList:
         with closing(self.connect()) as connection:
             rows = connection.execute(
-                "SELECT * FROM ingestion_jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT * FROM ingestion_jobs WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?",
+                (workspace_id, limit),
             ).fetchall()
-            total = connection.execute("SELECT COUNT(*) FROM ingestion_jobs").fetchone()[0]
+            total = connection.execute(
+                "SELECT COUNT(*) FROM ingestion_jobs WHERE workspace_id = ?", (workspace_id,)
+            ).fetchone()[0]
         return IngestionJobList(items=[self._ingestion_job(row) for row in rows], total=total)
 
     def claim_next_ingestion_job(self) -> IngestionJob | None:
@@ -543,36 +633,40 @@ class DocumentRepository:
             connection.commit()
         return cursor.rowcount + cancelled
 
-    def cleanup_ingestion_jobs(self) -> tuple[int, list[Path]]:
+    def cleanup_ingestion_jobs(self, workspace_id: str = "local") -> tuple[int, list[Path]]:
         with closing(self.connect()) as connection:
             rows = connection.execute(
                 """SELECT input_path, status FROM ingestion_jobs
-                WHERE status IN ('completed', 'failed', 'cancelled')"""
+                WHERE workspace_id = ? AND status IN ('completed', 'failed', 'cancelled')""",
+                (workspace_id,),
             ).fetchall()
             cursor = connection.execute(
                 """DELETE FROM ingestion_jobs
-                WHERE status IN ('completed', 'failed', 'cancelled')"""
+                WHERE workspace_id = ? AND status IN ('completed', 'failed', 'cancelled')""",
+                (workspace_id,),
             )
             connection.commit()
         disposable = [Path(row["input_path"]) for row in rows if row["status"] != "completed"]
         return cursor.rowcount, disposable
 
-    def get(self, document_id: str) -> DocumentRead | None:
+    def get(self, document_id: str, workspace_id: str = "local") -> DocumentRead | None:
         with closing(self.connect()) as connection:
             row = connection.execute(
-                "SELECT * FROM documents WHERE id = ?", (document_id,)
+                "SELECT * FROM documents WHERE id = ? AND workspace_id = ?",
+                (document_id, workspace_id),
             ).fetchone()
         return self._document(row) if row else None
 
-    def source_path(self, document_id: str) -> Path | None:
+    def source_path(self, document_id: str, workspace_id: str = "local") -> Path | None:
         with closing(self.connect()) as connection:
             row = connection.execute(
-                "SELECT source_path FROM documents WHERE id = ?", (document_id,)
+                "SELECT source_path FROM documents WHERE id = ? AND workspace_id = ?",
+                (document_id, workspace_id),
             ).fetchone()
         return Path(row["source_path"]) if row and row["source_path"] else None
 
-    def update(self, document_id: str, payload: DocumentUpdate) -> DocumentRead | None:
-        current = self.get(document_id)
+    def update(self, document_id: str, payload: DocumentUpdate, workspace_id: str = "local") -> DocumentRead | None:
+        current = self.get(document_id, workspace_id)
         if current is None:
             return None
         fields = payload.model_fields_set
@@ -585,17 +679,17 @@ class DocumentRepository:
             connection.execute(
                 """UPDATE documents
                 SET title = ?, collection_name = ?, tags_json = ?, favorite = ?, updated_at = ?
-                WHERE id = ?""",
-                (title, collection, json.dumps(tags), favorite, now, document_id),
+                WHERE id = ? AND workspace_id = ?""",
+                (title, collection, json.dumps(tags), favorite, now, document_id, workspace_id),
             )
             if title != current.title:
                 connection.execute(
                     "UPDATE chunks SET title = ? WHERE document_id = ?", (title, document_id)
                 )
             connection.commit()
-        return self.get(document_id)
+        return self.get(document_id, workspace_id)
 
-    def bulk_update(self, payload: BulkDocumentUpdate) -> BulkUpdateResult:
+    def bulk_update(self, payload: BulkDocumentUpdate, workspace_id: str = "local") -> BulkUpdateResult:
         fields = payload.model_fields_set
         assignments: list[str] = []
         params: list[object] = []
@@ -616,26 +710,26 @@ class DocumentRepository:
         params.extend(payload.document_ids)
         with closing(self.connect()) as connection:
             cursor = connection.execute(
-                f"UPDATE documents SET {', '.join(assignments)} WHERE id IN ({placeholders})",
-                params,
+                f"UPDATE documents SET {', '.join(assignments)} WHERE workspace_id = ? AND id IN ({placeholders})",
+                [*params[:len(params) - len(payload.document_ids)], workspace_id, *payload.document_ids],
             )
             connection.commit()
         return BulkUpdateResult(updated=cursor.rowcount)
 
-    def rename_collection(self, old_name: str, new_name: str) -> int:
+    def rename_collection(self, old_name: str, new_name: str, workspace_id: str = "local") -> int:
         with closing(self.connect()) as connection:
             cursor = connection.execute(
-                "UPDATE documents SET collection_name = ?, updated_at = ? WHERE collection_name = ?",
-                (new_name, datetime.now(UTC).isoformat(), old_name),
+                "UPDATE documents SET collection_name = ?, updated_at = ? WHERE workspace_id = ? AND collection_name = ?",
+                (new_name, datetime.now(UTC).isoformat(), workspace_id, old_name),
             )
             connection.commit()
         return cursor.rowcount
 
-    def clear_collection(self, name: str) -> int:
+    def clear_collection(self, name: str, workspace_id: str = "local") -> int:
         with closing(self.connect()) as connection:
             cursor = connection.execute(
-                "UPDATE documents SET collection_name = NULL, updated_at = ? WHERE collection_name = ?",
-                (datetime.now(UTC).isoformat(), name),
+                "UPDATE documents SET collection_name = NULL, updated_at = ? WHERE workspace_id = ? AND collection_name = ?",
+                (datetime.now(UTC).isoformat(), workspace_id, name),
             )
             connection.commit()
         return cursor.rowcount
@@ -650,43 +744,48 @@ class DocumentRepository:
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
 
-    def list_saved_views(self) -> SavedViewList:
+    def list_saved_views(self, workspace_id: str = "local") -> SavedViewList:
         with closing(self.connect()) as connection:
-            rows = connection.execute("SELECT * FROM saved_views ORDER BY name COLLATE NOCASE").fetchall()
+            rows = connection.execute(
+                "SELECT * FROM saved_views WHERE workspace_id = ? ORDER BY name COLLATE NOCASE",
+                (workspace_id,),
+            ).fetchall()
         return SavedViewList(items=[self._saved_view(row) for row in rows], total=len(rows))
 
-    def create_saved_view(self, payload: SavedViewCreate) -> SavedViewRead:
+    def create_saved_view(self, payload: SavedViewCreate, workspace_id: str = "local") -> SavedViewRead:
         view_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
         with closing(self.connect()) as connection:
             connection.execute(
                 """INSERT INTO saved_views
-                (id, name, query, collection_name, tags_json, source_types_json, favorite, date_range, sort_mode, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (view_id, payload.name, payload.query, payload.collection, json.dumps(payload.tags),
+                (id, workspace_id, name, query, collection_name, tags_json, source_types_json, favorite, date_range, sort_mode, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (view_id, workspace_id, payload.name, payload.query, payload.collection, json.dumps(payload.tags),
                  json.dumps(payload.source_types), payload.favorite, payload.date_range, payload.sort, now, now),
             )
             connection.commit()
             row = connection.execute("SELECT * FROM saved_views WHERE id = ?", (view_id,)).fetchone()
         return self._saved_view(row)
 
-    def update_saved_view(self, view_id: str, payload: SavedViewUpdate) -> SavedViewRead | None:
+    def update_saved_view(self, view_id: str, payload: SavedViewUpdate, workspace_id: str = "local") -> SavedViewRead | None:
         now = datetime.now(UTC).isoformat()
         with closing(self.connect()) as connection:
             cursor = connection.execute(
                 """UPDATE saved_views SET name = ?, query = ?, collection_name = ?, tags_json = ?,
                 source_types_json = ?, favorite = ?, date_range = ?, sort_mode = ?, updated_at = ?
-                WHERE id = ?""",
+                WHERE id = ? AND workspace_id = ?""",
                 (payload.name, payload.query, payload.collection, json.dumps(payload.tags),
-                 json.dumps(payload.source_types), payload.favorite, payload.date_range, payload.sort, now, view_id),
+                 json.dumps(payload.source_types), payload.favorite, payload.date_range, payload.sort, now, view_id, workspace_id),
             )
             connection.commit()
             row = connection.execute("SELECT * FROM saved_views WHERE id = ?", (view_id,)).fetchone()
         return self._saved_view(row) if cursor.rowcount and row else None
 
-    def delete_saved_view(self, view_id: str) -> bool:
+    def delete_saved_view(self, view_id: str, workspace_id: str = "local") -> bool:
         with closing(self.connect()) as connection:
-            cursor = connection.execute("DELETE FROM saved_views WHERE id = ?", (view_id,))
+            cursor = connection.execute(
+                "DELETE FROM saved_views WHERE id = ? AND workspace_id = ?", (view_id, workspace_id)
+            )
             connection.commit()
         return cursor.rowcount > 0
 
@@ -708,13 +807,13 @@ class DocumentRepository:
             created_at=row["created_at"],
         )
 
-    def create_conversation(self, payload: ConversationCreate) -> ConversationRead:
+    def create_conversation(self, payload: ConversationCreate, workspace_id: str = "local") -> ConversationRead:
         conversation_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
         with closing(self.connect()) as connection:
             connection.execute(
-                "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (conversation_id, payload.title, now, now),
+                "INSERT INTO conversations (id, workspace_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (conversation_id, workspace_id, payload.title, now, now),
             )
             connection.commit()
             row = connection.execute(
@@ -722,22 +821,24 @@ class DocumentRepository:
             ).fetchone()
         return self._conversation(row)
 
-    def get_conversation(self, conversation_id: str) -> ConversationRead | None:
+    def get_conversation(self, conversation_id: str, workspace_id: str = "local") -> ConversationRead | None:
         with closing(self.connect()) as connection:
             row = connection.execute(
-                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+                "SELECT * FROM conversations WHERE id = ? AND workspace_id = ?",
+                (conversation_id, workspace_id),
             ).fetchone()
         return self._conversation(row) if row else None
 
-    def list_conversations(self) -> ConversationList:
+    def list_conversations(self, workspace_id: str = "local") -> ConversationList:
         with closing(self.connect()) as connection:
             rows = connection.execute(
-                "SELECT * FROM conversations ORDER BY updated_at DESC"
+                "SELECT * FROM conversations WHERE workspace_id = ? ORDER BY updated_at DESC",
+                (workspace_id,),
             ).fetchall()
         return ConversationList(items=[self._conversation(row) for row in rows], total=len(rows))
 
-    def get_conversation_detail(self, conversation_id: str) -> ConversationDetail | None:
-        conversation = self.get_conversation(conversation_id)
+    def get_conversation_detail(self, conversation_id: str, workspace_id: str = "local") -> ConversationDetail | None:
+        conversation = self.get_conversation(conversation_id, workspace_id)
         if conversation is None:
             return None
         with closing(self.connect()) as connection:
@@ -752,13 +853,13 @@ class DocumentRepository:
         )
 
     def update_conversation(
-        self, conversation_id: str, payload: ConversationUpdate
+        self, conversation_id: str, payload: ConversationUpdate, workspace_id: str = "local"
     ) -> ConversationRead | None:
         now = datetime.now(UTC).isoformat()
         with closing(self.connect()) as connection:
             cursor = connection.execute(
-                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-                (payload.title, now, conversation_id),
+                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND workspace_id = ?",
+                (payload.title, now, conversation_id, workspace_id),
             )
             connection.commit()
             row = connection.execute(
@@ -766,10 +867,11 @@ class DocumentRepository:
             ).fetchone()
         return self._conversation(row) if cursor.rowcount and row else None
 
-    def delete_conversation(self, conversation_id: str) -> bool:
+    def delete_conversation(self, conversation_id: str, workspace_id: str = "local") -> bool:
         with closing(self.connect()) as connection:
             cursor = connection.execute(
-                "DELETE FROM conversations WHERE id = ?", (conversation_id,)
+                "DELETE FROM conversations WHERE id = ? AND workspace_id = ?",
+                (conversation_id, workspace_id),
             )
             connection.commit()
         return cursor.rowcount > 0
@@ -809,23 +911,27 @@ class DocumentRepository:
             )
             connection.commit()
 
-    def list(self, limit: int, offset: int) -> DocumentList:
+    def list(self, limit: int, offset: int, workspace_id: str = "local") -> DocumentList:
         with closing(self.connect()) as connection:
             rows = connection.execute(
-                "SELECT * FROM documents ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                "SELECT * FROM documents WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (workspace_id, limit, offset),
             ).fetchall()
-            total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            total = connection.execute(
+                "SELECT COUNT(*) FROM documents WHERE workspace_id = ?", (workspace_id,)
+            ).fetchone()[0]
         return DocumentList(items=[self._document(row) for row in rows], total=total)
 
-    def delete(self, document_id: str) -> bool:
+    def delete(self, document_id: str, workspace_id: str = "local") -> bool:
         with closing(self.connect()) as connection:
-            cursor = connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+            cursor = connection.execute(
+                "DELETE FROM documents WHERE id = ? AND workspace_id = ?", (document_id, workspace_id)
+            )
             connection.commit()
         return cursor.rowcount > 0
 
-    def list_notes(self, document_id: str) -> DocumentNoteList | None:
-        if self.get(document_id) is None:
+    def list_notes(self, document_id: str, workspace_id: str = "local") -> DocumentNoteList | None:
+        if self.get(document_id, workspace_id) is None:
             return None
         with closing(self.connect()) as connection:
             rows = connection.execute(
@@ -836,8 +942,8 @@ class DocumentRepository:
             ).fetchall()
         return DocumentNoteList(items=[self._note(row) for row in rows], total=len(rows))
 
-    def create_note(self, document_id: str, payload: DocumentNoteCreate) -> DocumentNoteRead | None:
-        if self.get(document_id) is None:
+    def create_note(self, document_id: str, payload: DocumentNoteCreate, workspace_id: str = "local") -> DocumentNoteRead | None:
+        if self.get(document_id, workspace_id) is None:
             return None
         note_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
@@ -859,7 +965,10 @@ class DocumentRepository:
         document_id: str,
         note_id: str,
         payload: DocumentNoteUpdate,
+        workspace_id: str = "local",
     ) -> DocumentNoteRead | None:
+        if self.get(document_id, workspace_id) is None:
+            return None
         now = datetime.now(UTC).isoformat()
         with closing(self.connect()) as connection:
             cursor = connection.execute(
@@ -876,7 +985,9 @@ class DocumentRepository:
             ).fetchone()
         return self._note(row)
 
-    def delete_note(self, document_id: str, note_id: str) -> bool:
+    def delete_note(self, document_id: str, note_id: str, workspace_id: str = "local") -> bool:
+        if self.get(document_id, workspace_id) is None:
+            return False
         with closing(self.connect()) as connection:
             cursor = connection.execute(
                 "DELETE FROM document_notes WHERE id = ? AND document_id = ?",
@@ -885,8 +996,8 @@ class DocumentRepository:
             connection.commit()
         return cursor.rowcount > 0
 
-    def list_highlights(self, document_id: str) -> DocumentHighlightList | None:
-        if self.get(document_id) is None:
+    def list_highlights(self, document_id: str, workspace_id: str = "local") -> DocumentHighlightList | None:
+        if self.get(document_id, workspace_id) is None:
             return None
         with closing(self.connect()) as connection:
             rows = connection.execute(
@@ -899,9 +1010,9 @@ class DocumentRepository:
         )
 
     def create_highlight(
-        self, document_id: str, payload: DocumentHighlightCreate
+        self, document_id: str, payload: DocumentHighlightCreate, workspace_id: str = "local"
     ) -> DocumentHighlightRead | None:
-        document = self.get(document_id)
+        document = self.get(document_id, workspace_id)
         if document is None:
             return None
         if payload.end_offset > len(document.content):
@@ -933,8 +1044,11 @@ class DocumentRepository:
         return self._highlight(row)
 
     def update_highlight(
-        self, document_id: str, highlight_id: str, payload: DocumentHighlightUpdate
+        self, document_id: str, highlight_id: str, payload: DocumentHighlightUpdate,
+        workspace_id: str = "local",
     ) -> DocumentHighlightRead | None:
+        if self.get(document_id, workspace_id) is None:
+            return None
         with closing(self.connect()) as connection:
             existing = connection.execute(
                 "SELECT * FROM document_highlights WHERE id = ? AND document_id = ?",
@@ -955,7 +1069,9 @@ class DocumentRepository:
             ).fetchone()
         return self._highlight(row)
 
-    def delete_highlight(self, document_id: str, highlight_id: str) -> bool:
+    def delete_highlight(self, document_id: str, highlight_id: str, workspace_id: str = "local") -> bool:
+        if self.get(document_id, workspace_id) is None:
+            return False
         with closing(self.connect()) as connection:
             cursor = connection.execute(
                 "DELETE FROM document_highlights WHERE id = ? AND document_id = ?",
@@ -964,12 +1080,16 @@ class DocumentRepository:
             connection.commit()
         return cursor.rowcount > 0
 
-    def embedding_status(self, model: str, runtime_loaded: bool) -> EmbeddingStatus:
+    def embedding_status(self, model: str, runtime_loaded: bool, workspace_id: str = "local") -> EmbeddingStatus:
         with closing(self.connect()) as connection:
-            total = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            total = connection.execute(
+                """SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id
+                WHERE d.workspace_id = ?""", (workspace_id,)
+            ).fetchone()[0]
             indexed = connection.execute(
-                "SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL AND embedding_model = ?",
-                (model,),
+                """SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id
+                WHERE d.workspace_id = ? AND c.embedding IS NOT NULL AND c.embedding_model = ?""",
+                (workspace_id, model),
             ).fetchone()[0]
         return EmbeddingStatus(
             model=model,
@@ -980,13 +1100,14 @@ class DocumentRepository:
             loaded=runtime_loaded,
         )
 
-    def chunks_pending_embedding(self, model: str) -> list[sqlite3.Row]:
+    def chunks_pending_embedding(self, model: str, workspace_id: str = "local") -> list[sqlite3.Row]:
         with closing(self.connect()) as connection:
             return connection.execute(
-                """SELECT id, content FROM chunks
-                WHERE embedding IS NULL OR embedding_model != ?
-                ORDER BY id""",
-                (model,),
+                """SELECT c.id, c.content FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE d.workspace_id = ? AND (c.embedding IS NULL OR c.embedding_model != ?)
+                ORDER BY c.id""",
+                (workspace_id, model),
             ).fetchall()
 
     def save_embeddings(
@@ -1003,12 +1124,13 @@ class DocumentRepository:
 
     @staticmethod
     def _scope_sql(
+        workspace_id: str,
         document_ids: list[str] | None,
         collection: str | None,
         source_types: list[str] | None,
     ) -> tuple[str, list]:
-        clauses: list[str] = []
-        params: list = []
+        clauses: list[str] = ["d.workspace_id = ?"]
+        params: list = [workspace_id]
         if document_ids:
             clauses.append(f"d.id IN ({','.join('?' for _ in document_ids)})")
             params.extend(document_ids)
@@ -1027,8 +1149,9 @@ class DocumentRepository:
         document_ids: list[str] | None = None,
         collection: str | None = None,
         source_types: list[str] | None = None,
+        workspace_id: str = "local",
     ) -> list[dict]:
-        scope_sql, scope_params = self._scope_sql(document_ids, collection, source_types)
+        scope_sql, scope_params = self._scope_sql(workspace_id, document_ids, collection, source_types)
         with closing(self.connect()) as connection:
             rows = connection.execute(
                 f"""
@@ -1056,8 +1179,9 @@ class DocumentRepository:
         document_ids: list[str] | None = None,
         collection: str | None = None,
         source_types: list[str] | None = None,
+        workspace_id: str = "local",
     ) -> list[dict]:
-        scope_sql, scope_params = self._scope_sql(document_ids, collection, source_types)
+        scope_sql, scope_params = self._scope_sql(workspace_id, document_ids, collection, source_types)
         with closing(self.connect()) as connection:
             rows = connection.execute(
                 f"""SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
@@ -1105,6 +1229,7 @@ class DocumentRepository:
         document_ids: list[str] | None = None,
         collection: str | None = None,
         source_types: list[str] | None = None,
+        workspace_id: str = "local",
     ) -> tuple[list[dict], str | None]:
         terms = TOKEN_RE.findall(query)
         fts_query = " OR ".join(f'"{term}"' for term in terms)
@@ -1113,16 +1238,16 @@ class DocumentRepository:
 
         candidate_limit = max(limit * 3, 30)
         keyword = self._keyword_candidates(
-            fts_query, candidate_limit, document_ids, collection, source_types
+            fts_query, candidate_limit, document_ids, collection, source_types, workspace_id
         )
         semantic: list[dict] = []
         warning = None
-        status = self.embedding_status(embedder.model_name, embedder.loaded)
+        status = self.embedding_status(embedder.model_name, embedder.loaded, workspace_id)
         if status.indexed_chunks:
             try:
                 semantic = self._semantic_candidates(
                     embedder.embed_query(query), embedder.model_name, candidate_limit,
-                    document_ids, collection, source_types
+                    document_ids, collection, source_types, workspace_id
                 )
             except Exception:
                 warning = "Semantic retrieval is unavailable; the answer uses keyword evidence."
@@ -1132,7 +1257,7 @@ class DocumentRepository:
         rows = self._fuse(keyword, semantic, limit) if semantic else keyword[:limit]
         return rows, warning
 
-    def search(self, query: str, limit: int, mode: str, embedder) -> SearchResponse:
+    def search(self, query: str, limit: int, mode: str, embedder, workspace_id: str = "local") -> SearchResponse:
         started = time.perf_counter()
         terms = TOKEN_RE.findall(query)
         fts_query = " OR ".join(f'"{term}"' for term in terms)
@@ -1140,15 +1265,18 @@ class DocumentRepository:
             return SearchResponse(query=query, items=[], total=0, elapsed_ms=0, mode=mode)
 
         candidate_limit = max(limit * 3, 30)
-        keyword = self._keyword_candidates(fts_query, candidate_limit) if mode != "semantic" else []
+        keyword = self._keyword_candidates(
+            fts_query, candidate_limit, workspace_id=workspace_id
+        ) if mode != "semantic" else []
         semantic: list[dict] = []
         warning = None
         if mode != "keyword":
-            status = self.embedding_status(embedder.model_name, embedder.loaded)
+            status = self.embedding_status(embedder.model_name, embedder.loaded, workspace_id)
             if status.indexed_chunks:
                 try:
                     semantic = self._semantic_candidates(
-                        embedder.embed_query(query), embedder.model_name, candidate_limit
+                        embedder.embed_query(query), embedder.model_name, candidate_limit,
+                        workspace_id=workspace_id,
                     )
                 except Exception:
                     warning = "Semantic model is unavailable; showing keyword results."

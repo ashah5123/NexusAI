@@ -35,6 +35,7 @@ services:
       NEXUSAI_WHISPER_MODEL: ${NEXUSAI_WHISPER_MODEL:-base}
       NEXUSAI_WHISPER_CACHE: /app/data/models/whisper
       NEXUSAI_UPLOAD_DIR: /app/data/uploads
+      NEXUSAI_SECURE_COOKIES: ${NEXUSAI_SECURE_COOKIES:-0}
     volumes:
       - nexusai-data:/app/data
 

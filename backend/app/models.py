@@ -10,6 +10,76 @@ class HealthResponse(BaseModel):
     database: str
 
 
+class RegisterRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=10, max_length=200)
+
+    @field_validator("name", "email")
+    @classmethod
+    def normalize_identity(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class UserRead(BaseModel):
+    id: str
+    name: str
+    email: str
+
+
+class WorkspaceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class WorkspaceRead(BaseModel):
+    id: str
+    name: str
+    role: Literal["owner", "editor", "viewer"]
+
+
+class AuthSessionRead(BaseModel):
+    user: UserRead
+    workspace: WorkspaceRead
+    workspaces: list[WorkspaceRead]
+
+
+class WorkspaceSwitch(BaseModel):
+    workspace_id: str
+
+
+class InvitationCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    role: Literal["editor", "viewer"] = "viewer"
+
+
+class InvitationRead(BaseModel):
+    token: str
+    email: str
+    workspace_name: str
+    role: Literal["editor", "viewer"]
+    expires_at: datetime
+
+
+class InvitationAccept(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+
+
 class DocumentCreate(BaseModel):
     title: str = Field(min_length=1, max_length=240)
     content: str = Field(min_length=1, max_length=2_000_000)
@@ -283,6 +353,7 @@ class IngestionJob(BaseModel):
     cancel_requested: bool
     created_at: datetime
     updated_at: datetime
+    workspace_id: str = "local"
 
 
 class IngestionJobList(BaseModel):

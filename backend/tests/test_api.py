@@ -30,6 +30,10 @@ class DocumentApiTest(unittest.TestCase):
         main.ingestion_worker = self.worker
         self.client_context = TestClient(main.app)
         self.client = self.client_context.__enter__()
+        register = self.client.post("/api/auth/register", json={
+            "name": "Test Owner", "email": "owner@example.com", "password": "secure-test-password"
+        })
+        self.assertEqual(register.status_code, 201)
 
     def tearDown(self) -> None:
         self.client_context.__exit__(None, None, None)
@@ -175,6 +179,53 @@ class DocumentApiTest(unittest.TestCase):
         self.assertIn("launch-plan.md", markdown_response.headers["content-disposition"])
         self.assertEqual(json_response.json()["format"], "nexusai-research-report-v1")
         self.assertEqual(delete_response.status_code, 204)
+
+    def test_workspaces_isolate_documents(self) -> None:
+        local_document = self.client.post(
+            "/api/documents", json={"title": "Local source", "content": "Local evidence"}
+        )
+        created_workspace = self.client.post(
+            "/api/auth/workspaces", json={"name": "Second workspace"}
+        ).json()
+        switched = self.client.post(
+            "/api/auth/workspaces/switch", json={"workspace_id": created_workspace["id"]}
+        )
+        empty_list = self.client.get("/api/documents")
+        second_document = self.client.post(
+            "/api/documents", json={"title": "Second source", "content": "Separate evidence"}
+        )
+        isolated_search = self.client.get("/api/search?q=Local&mode=keyword")
+
+        self.assertEqual(local_document.status_code, 201)
+        self.assertEqual(switched.status_code, 200)
+        self.assertEqual(empty_list.json()["total"], 0)
+        self.assertEqual(second_document.status_code, 201)
+        self.assertEqual(self.client.get("/api/documents").json()["total"], 1)
+        self.assertEqual(isolated_search.json()["total"], 0)
+        self.assertEqual(self.client.get(f"/api/documents/{local_document.json()['id']}").status_code, 404)
+
+    def test_invited_viewer_has_read_only_access(self) -> None:
+        invitation = self.client.post(
+            "/api/auth/invitations", json={"email": "viewer@example.com", "role": "viewer"}
+        )
+        self.client.post("/api/auth/logout")
+        registered = self.client.post("/api/auth/register", json={
+            "name": "Test Viewer", "email": "viewer@example.com", "password": "viewer-test-password"
+        })
+        accepted = self.client.post(
+            "/api/auth/invitations/accept", json={"token": invitation.json()["token"]}
+        )
+        denied = self.client.post(
+            "/api/documents", json={"title": "Denied", "content": "Viewer cannot write"}
+        )
+        logout = self.client.post("/api/auth/logout")
+        unauthenticated = self.client.get("/api/documents")
+
+        self.assertEqual(registered.status_code, 201)
+        self.assertEqual(accepted.json()["workspace"]["role"], "viewer")
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(logout.status_code, 204)
+        self.assertEqual(unauthenticated.status_code, 401)
 
 
 if __name__ == "__main__":

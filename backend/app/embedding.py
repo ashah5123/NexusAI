@@ -47,9 +47,9 @@ class EmbeddingService:
         vector = next(iter(self._get_model().query_embed(query)))
         return np.asarray(vector, dtype=np.float32)
 
-    def index_pending(self, repository: "DocumentRepository") -> ReindexResult:
+    def index_pending(self, repository: "DocumentRepository", workspace_id: str = "local") -> ReindexResult:
         started = time.perf_counter()
-        chunks = repository.chunks_pending_embedding(MODEL_NAME)
+        chunks = repository.chunks_pending_embedding(MODEL_NAME, workspace_id)
         if chunks:
             texts = [row["content"] for row in chunks]
             vectors = self._get_model().passage_embed(texts, batch_size=32)
@@ -57,7 +57,7 @@ class EmbeddingService:
                 [(row["id"], np.asarray(vector, dtype=np.float32)) for row, vector in zip(chunks, vectors)],
                 MODEL_NAME,
             )
-        status = repository.embedding_status(MODEL_NAME, self.loaded)
+        status = repository.embedding_status(MODEL_NAME, self.loaded, workspace_id)
         return ReindexResult(
             **status.model_dump(),
             indexed_now=len(chunks),

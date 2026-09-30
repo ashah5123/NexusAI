@@ -49,7 +49,10 @@ class IngestionWorker:
         if self._thread:
             self._thread.join(timeout=2)
 
-    def submit(self, data: bytes, title: str, source_type: str, source_name: str) -> IngestionJob:
+    def submit(
+        self, data: bytes, title: str, source_type: str, source_name: str,
+        workspace_id: str = "local",
+    ) -> IngestionJob:
         job_id = str(uuid4())
         suffix = Path(source_name).suffix.lower()
         self.upload_dir.mkdir(parents=True, exist_ok=True)
@@ -59,7 +62,7 @@ class IngestionWorker:
         temporary_path.replace(input_path)
         try:
             job = self.repository.create_ingestion_job(
-                job_id, title, source_type, source_name, input_path
+                job_id, title, source_type, source_name, input_path, workspace_id
             )
         except Exception:
             input_path.unlink(missing_ok=True)
@@ -90,9 +93,11 @@ class IngestionWorker:
         current = self.repository.get_ingestion_job(job_id)
         return current is None or current.cancel_requested
 
-    def _finish_cancelled(self, job_id: str, document_id: str | None = None) -> None:
+    def _finish_cancelled(
+        self, job_id: str, document_id: str | None = None, workspace_id: str = "local"
+    ) -> None:
         if document_id:
-            self.repository.delete(document_id)
+            self.repository.delete(document_id, workspace_id)
         self.repository.update_ingestion_job(
             job_id,
             status="cancelled",
@@ -108,7 +113,7 @@ class IngestionWorker:
         if job is None:
             return False
         try:
-            existing = self.repository.get(job.id)
+            existing = self.repository.get(job.id, job.workspace_id)
             if existing is not None:
                 self.repository.update_ingestion_job(
                     job.id,
@@ -124,7 +129,7 @@ class IngestionWorker:
                 raise ValueError("The queued source file is missing")
             data = input_path.read_bytes()
             if self._cancelled(job.id):
-                self._finish_cancelled(job.id)
+                self._finish_cancelled(job.id, workspace_id=job.workspace_id)
                 return True
 
             if job.source_type == "pdf":
@@ -191,20 +196,21 @@ class IngestionWorker:
                 }
 
             if self._cancelled(job.id):
-                self._finish_cancelled(job.id)
+                self._finish_cancelled(job.id, workspace_id=job.workspace_id)
                 return True
             self.repository.update_ingestion_job(job.id, stage="Saving passages", progress=80)
             document = self.repository.create(
-                payload, document_id=job.id, source_path=input_path, **create_options
+                payload, document_id=job.id, source_path=input_path,
+                workspace_id=job.workspace_id, **create_options
             )
             if self._cancelled(job.id):
-                self._finish_cancelled(job.id, document.id)
+                self._finish_cancelled(job.id, document.id, job.workspace_id)
                 return True
 
             if self.embeddings.loaded:
                 self.repository.update_ingestion_job(job.id, stage="Indexing semantics", progress=90)
                 try:
-                    self.embeddings.index_pending(self.repository)
+                    self.embeddings.index_pending(self.repository, job.workspace_id)
                 except Exception:
                     pass
             self.repository.update_ingestion_job(
@@ -217,7 +223,7 @@ class IngestionWorker:
             )
         except Exception as exc:
             if self._cancelled(job.id):
-                self._finish_cancelled(job.id)
+                self._finish_cancelled(job.id, workspace_id=job.workspace_id)
             else:
                 self.repository.update_ingestion_job(
                     job.id,

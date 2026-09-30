@@ -2,7 +2,7 @@
 
 Local-first document search and text-to-speech, sized for a 16 GB Apple Silicon Mac.
 
-Phase 15 provides a local multimodal knowledge base with source-aware reading and organization: import PDFs, scanned
+Phase 16 provides a local multimodal knowledge base with source-aware reading and organization: import PDFs, scanned
 documents, images, audio, video, text, and Markdown; search page-aware or timestamped passages by
 exact wording or semantic meaning; inspect ranked snippets with source citations; and read any
 document or transcript aloud with local speech synthesis. Long-running OCR and transcription jobs
@@ -17,6 +17,10 @@ Grounded conversations persist locally, retain verified citations, and use recen
 follow-ups. Conversation threads can be reopened, renamed, or deleted from the Ask workspace. Each
 thread can be copied, printed, or downloaded as a Markdown research report or portable JSON record;
 reports include per-answer evidence and a deduplicated source register.
+Local accounts protect the API with expiring, HTTP-only sessions and PBKDF2 password hashes.
+Workspaces isolate documents, imports, search, saved views, conversations, and semantic indexes;
+owners can invite editors or read-only viewers with seven-day invitation tokens. The first account
+created after upgrading becomes the owner of the existing local workspace and retains its data.
 
 ## Stack
 
@@ -56,6 +60,8 @@ npm run dev
 
 Open **http://localhost:5173**. API documentation is available at
 **http://localhost:8000/docs**. Local documents are stored in `backend/data/nexusai.db`.
+Register the first account to claim the existing local workspace. For HTTPS deployments, set
+`NEXUSAI_SECURE_COOKIES=1` so session cookies are transmitted only over TLS.
 
 Keyword search works immediately and offline. To enable semantic and hybrid retrieval, add at least
 one document and select **Enable semantic search**. The first run downloads the approximately 67 MB
@@ -88,7 +94,7 @@ docker compose up --build
 ```
 
 The default profile starts only the API and frontend. The reserved PostgreSQL/pgvector service can
-be inspected with `docker compose --profile production-data up`, but Phase 15 does not depend on it.
+be inspected with `docker compose --profile production-data up`, but Phase 16 does not depend on it.
 
 ## Verify
 

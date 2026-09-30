@@ -14,6 +14,16 @@ button:disabled { cursor: wait; opacity: 0.58; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid rgba(239, 131, 84, 0.34); outline-offset: 2px; }
 
 .app-shell { min-height: 100vh; }
+.auth-shell { display: grid; min-height: 100vh; place-items: center; padding: 24px; background: radial-gradient(circle at top, #29463b 0, #17241f 48%, #101915 100%); }
+.auth-card { display: grid; gap: 17px; width: min(430px, 100%); border: 1px solid #40564d; border-radius: 10px; padding: 34px; color: #18251f; background: #fff; box-shadow: 0 24px 70px rgba(0,0,0,0.32); }
+.auth-card > .brand-mark { width: 42px; height: 42px; font-size: 23px; }
+.auth-card h1 { font-size: 31px; }
+.auth-card label { display: grid; gap: 7px; color: #4d5e56; font-size: 11px; font-weight: 850; }
+.auth-card input { width: 100%; height: 42px; border: 1px solid #b5c2bc; border-radius: 5px; padding: 0 11px; outline: 0; }
+.auth-card input:focus { border-color: #167d62; box-shadow: 0 0 0 3px rgba(22,125,98,0.1); }
+.auth-card small { color: #748079; font-size: 10px; line-height: 1.5; text-align: center; }
+.auth-switch { border: 0; padding: 2px; color: #167d62; background: transparent; font-size: 11px; font-weight: 800; }
+.auth-error { border-left: 3px solid #b73d2d; padding: 9px 10px; color: #842c21; background: #fff1ee; font-size: 11px; }
 .topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 12px; height: 64px; padding: 0 22px; color: #f7faf8; background: #17241f; border-bottom: 1px solid #293b34; box-shadow: 0 3px 14px rgba(19, 32, 27, 0.14); }
 .brand { display: flex; align-items: center; gap: 10px; margin-right: 18px; border: 0; color: inherit; background: none; font-size: 17px; font-weight: 800; }
 .brand-mark { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 6px; color: #18231f; background: #ef8354; font-family: Georgia, serif; font-size: 18px; font-weight: 800; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.24); }
@@ -30,6 +40,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .activity-button { position: relative; color: #b8c5c0; }
 .activity-button.active { color: #fff; background: rgba(255,255,255,0.08); }
 .activity-button > span { position: absolute; top: -2px; right: -3px; display: grid; place-items: center; min-width: 17px; height: 17px; border-radius: 9px; padding: 0 4px; color: #18231f; background: #ef8354; font-size: 9px; font-weight: 900; }
+.workspace-account { display: flex; align-items: center; gap: 3px; max-width: 390px; color: #b9c7c1; }
+.workspace-account > svg { flex: 0 0 auto; }
+.workspace-account select { width: min(190px, 17vw); height: 31px; border: 1px solid #43564e; border-radius: 4px; padding: 0 7px; color: #eef5f2; background: #24362f; font-size: 9px; font-weight: 750; }
+.workspace-account .icon-button { width: 29px; height: 29px; }
 .mobile-menu, .sidebar-close { display: none; }
 
 .primary-button, .secondary-button, .speech-button, .search-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; border: 1px solid transparent; border-radius: 5px; padding: 0 15px; font-size: 13px; font-weight: 750; transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease, box-shadow 140ms ease; }
@@ -332,7 +346,9 @@ mark { border-radius: 2px; padding: 1px 2px; color: #292114; background: #f7d788
   .topbar { gap: 8px; padding: 0 12px; }
   .mobile-menu { display: inline-grid; color: #c6d0cc; }
   .brand { margin-right: 4px; }
-  .brand > span:last-child, .status, .add-button span { display: none; }
+  .brand > span:last-child, .status, .add-button span, .workspace-account > svg { display: none; }
+  .workspace-account select { width: 120px; }
+  .workspace-account .icon-button:not(:last-child) { display: none; }
   .add-button { min-width: 38px; width: 38px; padding: 0; }
   .workspace-tabs button { min-width: 72px; padding: 0 10px; }
   .workspace { display: block; }
@@ -351,6 +367,7 @@ mark { border-radius: 2px; padding: 1px 2px; color: #292114; background: #f7d788
   .workspace-tabs { margin-right: auto; }
   .workspace-tabs button { min-width: 42px; padding: 0 9px; }
   .workspace-tabs button svg { display: none; }
+  .workspace-account select { width: 84px; }
   .search-bar { width: 100%; max-width: 100%; padding: 17px 14px 14px; overflow: hidden; }
   .query-heading { align-items: center; }
   .search-control { height: 44px; }
