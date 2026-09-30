@@ -1,18 +1,24 @@
 """NexusAI API for local document ingestion and retrieval."""
 
+import hmac
 import json
 import mimetypes
-import os
+import re
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.background import BackgroundTask
+from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .embedding import EmbeddingService
-from .auth import AuthContext, AuthError, AuthService
+from .auth import AuthContext, AuthError, AuthRateLimitError, AuthService
+from .config import settings
 from .generation import OllamaAnswerService
 from .ingestion import MAX_UPLOAD_BYTES
 from .jobs import IngestionWorker
@@ -67,6 +73,7 @@ from .models import (
 from .repository import DocumentRepository
 from .reports import build_json_report, build_markdown_report, report_filename
 from .ocr import OCRService
+from .observability import log_request, metrics
 from .speech import LocalSpeechService, SpeechError
 from .transcription import MAX_MEDIA_BYTES, TranscriptionService
 
@@ -93,18 +100,26 @@ async def lifespan(_: FastAPI):
         ingestion_worker.stop()
 
 
-app = FastAPI(title="NexusAI API", version="0.17.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.18.0", lifespan=lifespan)
+
+if settings.force_https:
+    app.add_middleware(HTTPSRedirectMiddleware)
+app.add_middleware(
+    TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts), www_redirect=False
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=list(settings.cors_origins),
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allow_headers=["*"],
+    allow_headers=["Accept", "Content-Type", settings.csrf_header, "X-Request-ID"],
     allow_credentials=True,
+    expose_headers=["X-Request-ID"],
 )
 
-SESSION_COOKIE = "nexusai_session"
-SECURE_COOKIES = os.getenv("NEXUSAI_SECURE_COOKIES", "0") == "1"
+SESSION_COOKIE = "__Host-nexusai_session" if settings.secure_cookies else "nexusai_session"
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 @app.middleware("http")
@@ -115,6 +130,65 @@ async def authenticate_api(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
         request.state.auth = context
     return await call_next(request)
+
+
+@app.middleware("http")
+async def production_controls(request: Request, call_next):
+    started = time.perf_counter()
+    supplied_request_id = request.headers.get("X-Request-ID", "")
+    request_id = (
+        supplied_request_id if REQUEST_ID_RE.fullmatch(supplied_request_id) else str(uuid4())
+    )
+    request.state.request_id = request_id
+    try:
+        if request.url.path.startswith("/api/") and request.method in MUTATING_METHODS:
+            if request.headers.get(settings.csrf_header) != "1":
+                response = JSONResponse(
+                    status_code=403, content={"detail": "CSRF header required"}
+                )
+            elif (
+                request.headers.get("origin")
+                and request.headers["origin"] not in settings.cors_origins
+            ):
+                response = JSONResponse(
+                    status_code=403, content={"detail": "Origin not allowed"}
+                )
+            else:
+                response = await call_next(request)
+        else:
+            response = await call_next(request)
+    except Exception:
+        elapsed = time.perf_counter() - started
+        metrics.observe(500, elapsed)
+        log_request(
+            event="http_request", request_id=request_id, method=request.method,
+            path=request.url.path, status=500, duration_ms=round(elapsed * 1000, 2),
+        )
+        raise
+    elapsed = time.perf_counter() - started
+    metrics.observe(response.status_code, elapsed)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = "camera=(), geolocation=(), microphone=()"
+    if settings.secure_cookies:
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
+    if request.url.path.startswith(("/api/", "/health", "/metrics")):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'"
+        )
+    response.headers["Cache-Control"] = (
+        "no-store" if request.url.path.startswith("/api/") else "no-cache"
+    )
+    log_request(
+        event="http_request", request_id=request_id, method=request.method,
+        path=request.url.path, status=response.status_code,
+        duration_ms=round(elapsed * 1000, 2),
+    )
+    return response
 
 
 def workspace(request: Request) -> str:
@@ -131,7 +205,7 @@ def require_editor(request: Request) -> AuthContext:
 def set_session_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         SESSION_COOKIE, token, max_age=30 * 24 * 60 * 60, httponly=True,
-        samesite="lax", secure=SECURE_COOKIES, path="/",
+        samesite="lax", secure=settings.secure_cookies, path="/",
     )
 
 
@@ -143,6 +217,32 @@ def api_root() -> RedirectResponse:
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(status="ok", service="nexusai-api", database=repository.health())
+
+
+@app.get("/health/live")
+def liveness() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def readiness() -> Response:
+    database = repository.health()
+    if database != "connected":
+        return JSONResponse(
+            status_code=503, content={"status": "unavailable", "database": database}
+        )
+    return JSONResponse(content={"status": "ready", "database": database})
+
+
+@app.get("/metrics")
+def application_metrics(request: Request) -> Response:
+    if settings.environment == "production" and not settings.metrics_token:
+        raise HTTPException(status_code=404, detail="Not found")
+    if settings.metrics_token:
+        supplied = request.headers.get("Authorization", "")
+        if not hmac.compare_digest(supplied, f"Bearer {settings.metrics_token}"):
+            raise HTTPException(status_code=401, detail="Metrics token required")
+    return Response(content=metrics.prometheus(), media_type="text/plain; version=0.0.4")
 
 
 @app.post("/api/auth/register", response_model=AuthSessionRead, status_code=status.HTTP_201_CREATED)
@@ -159,6 +259,10 @@ def register_account(payload: RegisterRequest, response: Response) -> AuthSessio
 def login_account(payload: LoginRequest, response: Response) -> AuthSessionRead:
     try:
         token, session = auth_service.login(payload.email, payload.password)
+    except AuthRateLimitError as exc:
+        raise HTTPException(
+            status_code=429, detail=str(exc), headers={"Retry-After": "900"}
+        ) from exc
     except AuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     set_session_cookie(response, token)

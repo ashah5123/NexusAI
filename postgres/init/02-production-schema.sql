@@ -1,0 +1,83 @@
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS users (
+    id text PRIMARY KEY, name text NOT NULL, email text NOT NULL UNIQUE,
+    password_salt text NOT NULL, password_hash text NOT NULL, created_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspaces (
+    id text PRIMARY KEY, name text NOT NULL, created_by text REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role text NOT NULL CHECK (role IN ('owner','editor','viewer')), created_at timestamptz NOT NULL,
+    PRIMARY KEY (workspace_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS login_attempts (
+    email text PRIMARY KEY, failed_count integer NOT NULL, window_started_at timestamptz NOT NULL,
+    locked_until timestamptz, last_attempt_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspace_invitations (
+    token_hash text PRIMARY KEY, workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    email text NOT NULL, role text NOT NULL CHECK (role IN ('editor','viewer')),
+    expires_at timestamptz NOT NULL, created_by text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL, accepted_at timestamptz
+);
+CREATE TABLE IF NOT EXISTS documents (
+    id text PRIMARY KEY, workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    title text NOT NULL, content text NOT NULL, source_type text NOT NULL, source_name text,
+    status text NOT NULL DEFAULT 'ready', word_count integer NOT NULL, page_count integer NOT NULL DEFAULT 1,
+    ocr_applied boolean NOT NULL DEFAULT false, duration_seconds double precision, language text,
+    collection_name text, tags_json jsonb NOT NULL DEFAULT '[]', favorite boolean NOT NULL DEFAULT false,
+    source_path text, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+    search_vector tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(content,''))) STORED
+);
+CREATE INDEX IF NOT EXISTS documents_workspace_created ON documents(workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS documents_search_vector ON documents USING gin(search_vector);
+CREATE TABLE IF NOT EXISTS chunks (
+    id bigint PRIMARY KEY, document_id text NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_index integer NOT NULL, page_number integer, start_seconds double precision,
+    end_seconds double precision, title text NOT NULL, content text NOT NULL,
+    embedding vector(384), embedding_model text, UNIQUE(document_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops);
+CREATE TABLE IF NOT EXISTS ingestion_jobs (
+    id text PRIMARY KEY, workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    title text NOT NULL, source_type text NOT NULL, source_name text NOT NULL, input_path text NOT NULL,
+    status text NOT NULL DEFAULT 'queued', stage text NOT NULL DEFAULT 'Waiting', progress integer NOT NULL DEFAULT 0,
+    error text, document_id text REFERENCES documents(id) ON DELETE SET NULL,
+    cancel_requested boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS document_notes (
+    id text PRIMARY KEY, document_id text NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    content text NOT NULL, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS document_highlights (
+    id text PRIMARY KEY, document_id text NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    start_offset integer NOT NULL, end_offset integer NOT NULL, selected_text text NOT NULL,
+    color text NOT NULL, annotation text, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS saved_views (
+    id text PRIMARY KEY, workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name text NOT NULL, query text NOT NULL DEFAULT '', collection_name text,
+    tags_json jsonb NOT NULL DEFAULT '[]', source_types_json jsonb NOT NULL DEFAULT '[]',
+    favorite boolean NOT NULL DEFAULT false, date_range text NOT NULL DEFAULT 'all',
+    sort_mode text NOT NULL DEFAULT 'recent', created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS conversations (
+    id text PRIMARY KEY, workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    title text NOT NULL, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id text PRIMARY KEY, conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role text NOT NULL CHECK (role IN ('user','assistant')), content text NOT NULL,
+    citations_json jsonb NOT NULL DEFAULT '[]', generated boolean NOT NULL DEFAULT false,
+    grounded boolean NOT NULL DEFAULT false, scope_description text NOT NULL DEFAULT 'All documents',
+    warning text, created_at timestamptz NOT NULL
+);

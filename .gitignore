@@ -1,5 +1,7 @@
 # Environment
 .env
+.env.*
+!.env.production.example
 
 # Python
 backend/.venv/

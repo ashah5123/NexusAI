@@ -118,6 +118,14 @@ class DocumentRepository:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS login_attempts (
+                    email TEXT PRIMARY KEY COLLATE NOCASE,
+                    failed_count INTEGER NOT NULL,
+                    window_started_at TEXT NOT NULL,
+                    locked_until TEXT,
+                    last_attempt_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS workspace_invitations (
                     token_hash TEXT PRIMARY KEY,
                     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,

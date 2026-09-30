@@ -1,0 +1,74 @@
+name: nexusai-production
+
+services:
+  edge:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      NEXUSAI_DOMAIN: ${NEXUSAI_DOMAIN:?Set NEXUSAI_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      NEXUSAI_ENV: production
+      NEXUSAI_DB_PATH: /app/data/nexusai.db
+      NEXUSAI_UPLOAD_DIR: /app/data/uploads
+      NEXUSAI_MODEL_CACHE: /app/data/models
+      NEXUSAI_WHISPER_CACHE: /app/data/models/whisper
+      NEXUSAI_SECURE_COOKIES: "1"
+      NEXUSAI_FORCE_HTTPS: "0"
+      NEXUSAI_ALLOWED_HOSTS: ${NEXUSAI_DOMAIN}
+      NEXUSAI_CORS_ORIGINS: https://${NEXUSAI_DOMAIN}
+      NEXUSAI_CSRF_HEADER: ${NEXUSAI_CSRF_HEADER:-X-NexusAI-CSRF}
+      NEXUSAI_METRICS_TOKEN: ${NEXUSAI_METRICS_TOKEN:?Set NEXUSAI_METRICS_TOKEN}
+      NEXUSAI_OLLAMA_URL: ${NEXUSAI_OLLAMA_URL:-http://host.docker.internal:11434}
+    volumes:
+      - nexusai-data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_CSRF_HEADER: ${NEXUSAI_CSRF_HEADER:-X-NexusAI-CSRF}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    profiles: ["migration"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nexusai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-nexusai}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+
+volumes:
+  nexusai-data:
+  postgres-data:
+  caddy-data:
+  caddy-config:

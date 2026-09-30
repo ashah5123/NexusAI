@@ -2,7 +2,7 @@
 
 Local-first document search and text-to-speech, sized for a 16 GB Apple Silicon Mac.
 
-Phase 16 provides a local multimodal knowledge base with source-aware reading and organization: import PDFs, scanned
+Phase 17 provides a production-hardened local multimodal knowledge base with source-aware reading and organization: import PDFs, scanned
 documents, images, audio, video, text, and Markdown; search page-aware or timestamped passages by
 exact wording or semantic meaning; inspect ranked snippets with source citations; and read any
 document or transcript aloud with local speech synthesis. Long-running OCR and transcription jobs
@@ -21,6 +21,11 @@ Local accounts protect the API with expiring, HTTP-only sessions and PBKDF2 pass
 Workspaces isolate documents, imports, search, saved views, conversations, and semantic indexes;
 owners can invite editors or read-only viewers with seven-day invitation tokens. The first account
 created after upgrading becomes the owner of the existing local workspace and retains its data.
+Explicit origin and host allowlists, CSRF checks, secure response headers, login throttling, request IDs,
+structured request logs, health probes, Prometheus metrics, verified backups, and continuous integration
+provide a safer operational baseline. A Caddy deployment terminates TLS and serves the frontend and API
+from one origin. A PostgreSQL/pgvector schema and one-way migration utility are included for staged data
+migration; the application runtime continues to use SQLite in this phase.
 
 ## Stack
 
@@ -34,7 +39,8 @@ created after upgrading becomes the owner of the existing local workspace and re
 - macOS `say` for local speech audio when available
 - Browser Web Speech API for text-to-speech
 - SQLite-backed background ingestion worker
-- Docker Compose as an optional run path
+- Caddy, Nginx, and Docker Compose as optional deployment paths
+- GitHub Actions for backend, frontend, and container verification
 
 The production target is recorded in `.cursor/rules/production-architecture.mdc`. Local adapters
 are intentionally replaceable by PostgreSQL/pgvector, S3, Redis, and neural speech services when
@@ -60,8 +66,7 @@ npm run dev
 
 Open **http://localhost:5173**. API documentation is available at
 **http://localhost:8000/docs**. Local documents are stored in `backend/data/nexusai.db`.
-Register the first account to claim the existing local workspace. For HTTPS deployments, set
-`NEXUSAI_SECURE_COOKIES=1` so session cookies are transmitted only over TLS.
+Register the first account to claim the existing local workspace.
 
 Keyword search works immediately and offline. To enable semantic and hybrid retrieval, add at least
 one document and select **Enable semantic search**. The first run downloads the approximately 67 MB
@@ -94,7 +99,72 @@ docker compose up --build
 ```
 
 The default profile starts only the API and frontend. The reserved PostgreSQL/pgvector service can
-be inspected with `docker compose --profile production-data up`, but Phase 16 does not depend on it.
+be inspected with `docker compose --profile production-data up`, but the application does not depend on it.
+
+## Production deployment
+
+Create production settings, point the domain's DNS at the host, and start the hardened stack:
+
+```bash
+cp .env.production.example .env.production
+# Replace every placeholder in .env.production before continuing.
+docker compose --env-file .env.production -f compose.production.yml up -d --build
+```
+
+Caddy obtains and renews TLS certificates. The API runs as a non-root user with a read-only root
+filesystem; persistent state is stored in the `nexusai-data` volume. Set an explicit domain,
+metrics token, and strong database password. Do not use wildcard CORS origins. If TLS terminates at
+a different proxy, preserve the original `Host` header and keep `NEXUSAI_SECURE_COOKIES=1`.
+
+Operational endpoints are `GET /health/live`, `GET /health/ready`, and `GET /metrics`. Production
+metrics require `Authorization: Bearer <NEXUSAI_METRICS_TOKEN>`. API logs are newline-delimited JSON
+and every response includes an `X-Request-ID`.
+
+## Backup and recovery
+
+The backup command uses SQLite's online backup API and includes uploaded source files plus a
+SHA-256 manifest. Verify every archive before moving or restoring it:
+
+```bash
+cd backend
+.venv/bin/python -m app.maintenance backup --output ../backups/nexusai.tar.gz
+.venv/bin/python -m app.maintenance verify ../backups/nexusai.tar.gz
+
+# Stop the API before a restore. Existing data is retained with a before-restore timestamp.
+.venv/bin/python -m app.maintenance restore ../backups/nexusai.tar.gz --force
+```
+
+For containers, run the same module in the `api` service and write the archive under `/app/data` so
+it is stored in the persistent volume. Copy verified archives to separate encrypted storage and
+periodically test restoration.
+
+## PostgreSQL migration staging
+
+Install the production requirements, create and verify a backup, initialize the pgvector schema,
+then run the one-way copy utility:
+
+```bash
+cd backend
+.venv/bin/pip install -r requirements-production.txt
+.venv/bin/python -m app.migrate_postgres \
+  --sqlite data/nexusai.db \
+  --database-url 'postgresql://nexusai:password@localhost:5432/nexusai' \
+  --force
+```
+
+`--force` confirms that the target tables may be truncated. Compare the printed per-table counts
+with the source and test the target before changing any infrastructure. This prepares PostgreSQL
+data but does not switch the API away from SQLite.
+
+## Deployment settings
+
+- `NEXUSAI_ENV`: use `production` outside local development.
+- `NEXUSAI_CORS_ORIGINS`: comma-separated, explicit browser origins.
+- `NEXUSAI_ALLOWED_HOSTS`: comma-separated HTTP host allowlist.
+- `NEXUSAI_FORCE_HTTPS`: redirect direct HTTP requests when TLS terminates in the API.
+- `NEXUSAI_SECURE_COOKIES`: require HTTPS for session cookies.
+- `NEXUSAI_CSRF_HEADER`: custom mutation header; defaults to `X-NexusAI-CSRF`.
+- `NEXUSAI_METRICS_TOKEN`: bearer token protecting production metrics.
 
 ## Verify
 

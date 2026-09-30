@@ -39,10 +39,17 @@ import {
   X,
 } from "lucide-react";
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE_URL = import.meta.env.VITE_API_URL
+  || (import.meta.env.DEV ? "http://localhost:8000" : window.location.origin);
+const CSRF_HEADER = import.meta.env.VITE_CSRF_HEADER || "X-NexusAI-CSRF";
 
 async function api(path, options) {
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, credentials: "include" });
+  const method = (options?.method || "GET").toUpperCase();
+  const headers = { ...(options?.headers || {}) };
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) headers[CSRF_HEADER] = "1";
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options, headers, credentials: "include",
+  });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.detail || `Request failed (${response.status})`);
@@ -51,7 +58,12 @@ async function api(path, options) {
 }
 
 async function apiBlob(path, options) {
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, credentials: "include" });
+  const method = (options?.method || "GET").toUpperCase();
+  const headers = { ...(options?.headers || {}) };
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) headers[CSRF_HEADER] = "1";
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options, headers, credentials: "include",
+  });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.detail || `Request failed (${response.status})`);

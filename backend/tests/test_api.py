@@ -30,6 +30,7 @@ class DocumentApiTest(unittest.TestCase):
         main.ingestion_worker = self.worker
         self.client_context = TestClient(main.app)
         self.client = self.client_context.__enter__()
+        self.client.headers.update({"X-NexusAI-CSRF": "1"})
         register = self.client.post("/api/auth/register", json={
             "name": "Test Owner", "email": "owner@example.com", "password": "secure-test-password"
         })
@@ -226,6 +227,43 @@ class DocumentApiTest(unittest.TestCase):
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(logout.status_code, 204)
         self.assertEqual(unauthenticated.status_code, 401)
+
+    def test_mutations_require_csrf_header_and_allowed_origin(self) -> None:
+        missing_header = self.client.post(
+            "/api/auth/logout", headers={"X-NexusAI-CSRF": ""}
+        )
+        untrusted_origin = self.client.post(
+            "/api/auth/logout", headers={"Origin": "https://attacker.example"}
+        )
+
+        self.assertEqual(missing_header.status_code, 403)
+        self.assertEqual(missing_header.json()["detail"], "CSRF header required")
+        self.assertEqual(untrusted_origin.status_code, 403)
+        self.assertEqual(untrusted_origin.json()["detail"], "Origin not allowed")
+
+    def test_health_metrics_and_security_headers(self) -> None:
+        response = self.client.get(
+            "/health/ready", headers={"X-Request-ID": "health-check-1"}
+        )
+        metrics_response = self.client.get("/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ready")
+        self.assertEqual(response.headers["x-request-id"], "health-check-1")
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertEqual(metrics_response.status_code, 200)
+        self.assertIn("nexusai_http_requests_total", metrics_response.text)
+
+    def test_login_is_temporarily_locked_after_repeated_failures(self) -> None:
+        self.client.post("/api/auth/logout")
+        payload = {"email": "owner@example.com", "password": "incorrect-password"}
+
+        responses = [self.client.post("/api/auth/login", json=payload) for _ in range(6)]
+
+        self.assertTrue(all(response.status_code == 401 for response in responses[:5]))
+        self.assertEqual(responses[-1].status_code, 429)
+        self.assertEqual(responses[-1].headers["retry-after"], "900")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,10 @@ class AuthError(ValueError):
     pass
 
 
+class AuthRateLimitError(AuthError):
+    pass
+
+
 class AuthService:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -98,16 +102,30 @@ class AuthService:
         return token, self.session(token)
 
     def login(self, email: str, password: str) -> tuple[str, AuthSessionRead]:
+        normalized_email = email.strip().lower()
         with closing(self.connect()) as connection:
-            row = connection.execute(
-                "SELECT * FROM users WHERE email = ?", (email.strip().lower(),)
+            now = datetime.now(UTC)
+            attempt = connection.execute(
+                "SELECT * FROM login_attempts WHERE email = ?", (normalized_email,)
             ).fetchone()
-            if row is None:
+            if attempt and attempt["locked_until"] and attempt["locked_until"] > now.isoformat():
+                raise AuthRateLimitError("Too many login attempts; try again later")
+            row = connection.execute(
+                "SELECT * FROM users WHERE email = ?", (normalized_email,)
+            ).fetchone()
+            valid = False
+            if row is not None:
+                salt = base64.b64decode(row["password_salt"])
+                _, candidate = self._password(password, salt)
+                valid = hmac.compare_digest(candidate, row["password_hash"])
+            else:
+                self._password(password, b"\0" * 16)
+            if not valid:
+                self._record_login_failure(connection, normalized_email, now, attempt)
+                connection.commit()
                 raise AuthError("Invalid email or password")
-            salt = base64.b64decode(row["password_salt"])
-            _, candidate = self._password(password, salt)
-            if not hmac.compare_digest(candidate, row["password_hash"]):
-                raise AuthError("Invalid email or password")
+            connection.execute("DELETE FROM login_attempts WHERE email = ?", (normalized_email,))
+            connection.commit()
             membership = connection.execute(
                 """SELECT workspace_id FROM workspace_members WHERE user_id = ?
                 ORDER BY created_at LIMIT 1""",
@@ -117,6 +135,31 @@ class AuthService:
             raise AuthError("This account has no workspace")
         token = self._create_session(row["id"], membership["workspace_id"])
         return token, self.session(token)
+
+    @staticmethod
+    def _record_login_failure(
+        connection: sqlite3.Connection,
+        email: str,
+        now: datetime,
+        attempt: sqlite3.Row | None,
+    ) -> None:
+        window = timedelta(minutes=15)
+        if attempt is None or now - datetime.fromisoformat(attempt["window_started_at"]) > window:
+            failed_count = 1
+            window_started = now
+        else:
+            failed_count = attempt["failed_count"] + 1
+            window_started = datetime.fromisoformat(attempt["window_started_at"])
+        locked_until = (now + window).isoformat() if failed_count >= 5 else None
+        connection.execute(
+            """INSERT INTO login_attempts
+            (email, failed_count, window_started_at, locked_until, last_attempt_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET failed_count = excluded.failed_count,
+                window_started_at = excluded.window_started_at,
+                locked_until = excluded.locked_until, last_attempt_at = excluded.last_attempt_at""",
+            (email, failed_count, window_started.isoformat(), locked_until, now.isoformat()),
+        )
 
     def _create_session(self, user_id: str, workspace_id: str) -> str:
         token = secrets.token_urlsafe(32)

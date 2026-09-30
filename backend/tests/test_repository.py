@@ -25,6 +25,7 @@ from app.models import (
     SavedViewCreate,
     SavedViewUpdate,
 )
+import app.maintenance as maintenance
 from app.embedding import EmbeddingService
 from app.generation import OllamaAnswerService
 from app.ingestion import IngestionError, extract_image, extract_pdf
@@ -80,6 +81,32 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertFalse(document.ocr_applied)
         self.assertTrue(self.repository.delete(document.id))
         self.assertEqual(self.repository.list(10, 0).total, 0)
+
+    def test_backup_verify_and_restore_round_trip(self) -> None:
+        self.repository.create(
+            DocumentCreate(title="Recovery source", content="Durable recovery evidence")
+        )
+        upload_dir = Path(self.temp_dir.name) / "uploads"
+        upload_dir.mkdir()
+        (upload_dir / "source.txt").write_text("stored source", encoding="utf-8")
+        archive = Path(self.temp_dir.name) / "backup.tar.gz"
+        restored_db = Path(self.temp_dir.name) / "restored" / "nexusai.db"
+        restored_uploads = Path(self.temp_dir.name) / "restored-uploads"
+
+        with patch.object(maintenance, "DB_PATH", self.repository.path), patch.object(
+            maintenance, "UPLOAD_DIR", upload_dir
+        ):
+            maintenance.create_backup(archive)
+            manifest = maintenance.verify_backup(archive)
+        with patch.object(maintenance, "DB_PATH", restored_db), patch.object(
+            maintenance, "UPLOAD_DIR", restored_uploads
+        ):
+            maintenance.restore_backup(archive, force=True)
+
+        restored = DocumentRepository(restored_db)
+        self.assertEqual(manifest["format"], "nexusai-backup-v1")
+        self.assertEqual(restored.list(10, 0).total, 1)
+        self.assertEqual((restored_uploads / "source.txt").read_text(), "stored source")
 
     def test_retrieval_keeps_full_passage_for_grounded_answers(self) -> None:
         self.repository.create(

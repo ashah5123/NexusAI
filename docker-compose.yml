@@ -40,10 +40,14 @@ services:
       - nexusai-data:/app/data
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:8000
+        VITE_CSRF_HEADER: ${NEXUSAI_CSRF_HEADER:-X-NexusAI-CSRF}
     container_name: nexusai-frontend
     ports:
-      - "127.0.0.1:5173:5173"
+      - "127.0.0.1:5173:80"
     depends_on:
       - api
 
