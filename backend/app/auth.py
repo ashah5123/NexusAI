@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from .database import SQLiteDatabase
 from .models import (
     AuthSessionRead,
     InvitationCreate,
@@ -41,14 +42,17 @@ class AuthRateLimitError(AuthError):
 
 
 class AuthService:
-    def __init__(self, path: Path) -> None:
-        self.path = path
+    def __init__(self, database) -> None:
+        self.database = (
+            SQLiteDatabase(database) if isinstance(database, Path) else database
+        )
 
-    def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+    def connect(self):
+        return self.database.connect()
+
+    @staticmethod
+    def _datetime(value: str | datetime) -> datetime:
+        return datetime.fromisoformat(value) if isinstance(value, str) else value
 
     @staticmethod
     def _password(password: str, salt: bytes | None = None) -> tuple[str, str]:
@@ -77,12 +81,14 @@ class AuthService:
                     "INSERT INTO users (id, name, email, password_salt, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (user_id, payload.name, email, salt, digest, now),
                 )
-            except sqlite3.IntegrityError as exc:
-                raise AuthError("An account with this email already exists") from exc
+            except Exception as exc:
+                if self.database.is_integrity_error(exc):
+                    raise AuthError("An account with this email already exists") from exc
+                raise
             member_count = connection.execute(
-                "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?",
+                "SELECT COUNT(*) AS count FROM workspace_members WHERE workspace_id = ?",
                 (DEFAULT_WORKSPACE_ID,),
-            ).fetchone()[0]
+            ).fetchone()["count"]
             if member_count == 0:
                 workspace_id = DEFAULT_WORKSPACE_ID
                 role = "owner"
@@ -108,7 +114,11 @@ class AuthService:
             attempt = connection.execute(
                 "SELECT * FROM login_attempts WHERE email = ?", (normalized_email,)
             ).fetchone()
-            if attempt and attempt["locked_until"] and attempt["locked_until"] > now.isoformat():
+            if (
+                attempt
+                and attempt["locked_until"]
+                and self._datetime(attempt["locked_until"]) > now
+            ):
                 raise AuthRateLimitError("Too many login attempts; try again later")
             row = connection.execute(
                 "SELECT * FROM users WHERE email = ?", (normalized_email,)
@@ -138,18 +148,18 @@ class AuthService:
 
     @staticmethod
     def _record_login_failure(
-        connection: sqlite3.Connection,
+        connection,
         email: str,
         now: datetime,
         attempt: sqlite3.Row | None,
     ) -> None:
         window = timedelta(minutes=15)
-        if attempt is None or now - datetime.fromisoformat(attempt["window_started_at"]) > window:
+        if attempt is None or now - AuthService._datetime(attempt["window_started_at"]) > window:
             failed_count = 1
             window_started = now
         else:
             failed_count = attempt["failed_count"] + 1
-            window_started = datetime.fromisoformat(attempt["window_started_at"])
+            window_started = AuthService._datetime(attempt["window_started_at"])
         locked_until = (now + window).isoformat() if failed_count >= 5 else None
         connection.execute(
             """INSERT INTO login_attempts

@@ -26,6 +26,7 @@ from app.models import (
     SavedViewUpdate,
 )
 import app.maintenance as maintenance
+from app.database import _postgres_sql
 from app.embedding import EmbeddingService
 from app.generation import OllamaAnswerService
 from app.ingestion import IngestionError, extract_image, extract_pdf
@@ -81,6 +82,17 @@ class DocumentRepositoryTest(unittest.TestCase):
         self.assertFalse(document.ocr_applied)
         self.assertTrue(self.repository.delete(document.id))
         self.assertEqual(self.repository.list(10, 0).total, 0)
+
+    def test_postgres_sql_compatibility_translation(self) -> None:
+        translated = _postgres_sql(
+            "SELECT rowid FROM saved_views WHERE favorite = ? "
+            "ORDER BY name COLLATE NOCASE"
+        )
+
+        self.assertEqual(
+            translated,
+            "SELECT id FROM saved_views WHERE favorite = %s ORDER BY LOWER(name)",
+        )
 
     def test_backup_verify_and_restore_round_trip(self) -> None:
         self.repository.create(

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import struct
+from contextlib import closing
 from pathlib import Path
 
 
@@ -40,6 +42,32 @@ def convert(column: str, value):
     if column == "embedding":
         return vector_text(value)
     return value
+
+
+def validate_migration(sqlite_path: Path, database_url: str) -> dict[str, dict[str, int]]:
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise RuntimeError("Install requirements-production.txt before validating") from exc
+    comparison: dict[str, dict[str, int]] = {}
+    with closing(sqlite3.connect(sqlite_path)) as source, psycopg.connect(database_url) as target:
+        if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise ValueError("SQLite integrity check failed")
+        for table in TABLES:
+            exists = source.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            source_count = (
+                source.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                if exists else 0
+            )
+            target_count = target.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            comparison[table] = {"sqlite": source_count, "postgresql": target_count}
+            if source_count != target_count:
+                raise ValueError(
+                    f"Migration count mismatch for {table}: {source_count} != {target_count}"
+                )
+    return comparison
 
 
 def migrate(sqlite_path: Path, database_url: str, schema_path: Path, force: bool) -> dict[str, int]:
@@ -85,6 +113,18 @@ def migrate(sqlite_path: Path, database_url: str, schema_path: Path, force: bool
                     [tuple(convert(column, row[column]) for column in columns) for row in rows],
                 )
             counts[table] = len(rows)
+            target_count = target.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            if target_count != len(rows):
+                raise ValueError(
+                    f"Migration count mismatch for {table}: {len(rows)} != {target_count}"
+                )
+        target.execute(
+            """SELECT setval(
+                pg_get_serial_sequence('chunks', 'id'),
+                COALESCE((SELECT MAX(id) FROM chunks), 1),
+                EXISTS (SELECT 1 FROM chunks)
+            )"""
+        )
         target.commit()
     source.close()
     return counts
@@ -93,14 +133,27 @@ def migrate(sqlite_path: Path, database_url: str, schema_path: Path, force: bool
 def main() -> None:
     parser = argparse.ArgumentParser(description="Migrate NexusAI SQLite data to PostgreSQL")
     parser.add_argument("--sqlite", type=Path, required=True)
-    parser.add_argument("--database-url", required=True)
+    parser.add_argument(
+        "--database-url", default=os.getenv("NEXUSAI_DATABASE_URL"),
+        help="Defaults to NEXUSAI_DATABASE_URL",
+    )
     parser.add_argument(
         "--schema", type=Path,
         default=Path(__file__).resolve().parents[2] / "postgres/init/02-production-schema.sql",
     )
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--validate-only", action="store_true",
+        help="Compare source and target table counts without changing either database",
+    )
     args = parser.parse_args()
-    print(json.dumps(migrate(args.sqlite, args.database_url, args.schema, args.force), indent=2))
+    if not args.database_url:
+        parser.error("--database-url or NEXUSAI_DATABASE_URL is required")
+    if args.validate_only:
+        result = validate_migration(args.sqlite, args.database_url)
+    else:
+        result = migrate(args.sqlite, args.database_url, args.schema, args.force)
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

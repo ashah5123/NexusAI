@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 import re
 import sqlite3
 import time
@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import numpy as np
 
+from .database import PostgresDatabase, SQLiteDatabase
 from .models import (
     DocumentCreate,
     AnswerResponse,
@@ -69,19 +70,26 @@ def split_chunks(text: str) -> list[str]:
 
 
 class DocumentRepository:
-    """SQLite repository with page-aware FTS5 passage retrieval."""
+    """Document repository supporting SQLite/FTS5 and PostgreSQL/pgvector."""
 
-    def __init__(self, path: Path = DB_PATH) -> None:
-        self.path = path
+    def __init__(self, path: Path = DB_PATH, database_url: str | None = None) -> None:
+        self.database = (
+            PostgresDatabase(database_url) if database_url else SQLiteDatabase(path)
+        )
+        self.path = self.database.path
 
-    def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+    @property
+    def backend(self) -> str:
+        return self.database.kind
+
+    def connect(self):
+        return self.database.connect()
 
     def initialize(self) -> None:
+        if self.backend == "postgresql":
+            self._initialize_postgres()
+            return
+        assert self.path is not None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as connection:
             connection.executescript(
@@ -367,6 +375,26 @@ class DocumentRepository:
             self._backfill_chunks(connection)
             connection.commit()
 
+    def _initialize_postgres(self) -> None:
+        schema_path = Path(__file__).resolve().parents[2] / "postgres/init/02-production-schema.sql"
+        with closing(self.connect()) as connection:
+            connection.execute(schema_path.read_text(encoding="utf-8"))
+            connection.execute(
+                """INSERT INTO workspaces (id, name, created_by, created_at)
+                VALUES ('local', 'Local workspace', NULL, ?)
+                ON CONFLICT (id) DO NOTHING""",
+                (datetime.now(UTC),),
+            )
+            self._backfill_chunks(connection)
+            connection.execute(
+                """SELECT setval(
+                    pg_get_serial_sequence('chunks', 'id'),
+                    COALESCE((SELECT MAX(id) FROM chunks), 1),
+                    EXISTS (SELECT 1 FROM chunks)
+                )"""
+            )
+            connection.commit()
+
     def _backfill_chunks(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute(
             """SELECT d.id, d.title, d.content
@@ -383,7 +411,7 @@ class DocumentRepository:
 
     @staticmethod
     def _insert_chunks(
-        connection: sqlite3.Connection,
+        connection,
         document_id: str,
         title: str,
         sections: list[tuple[int | None, float | None, float | None, str]],
@@ -412,8 +440,14 @@ class DocumentRepository:
             with closing(self.connect()) as connection:
                 connection.execute("SELECT 1").fetchone()
             return "connected"
-        except sqlite3.Error:
-            return "unavailable"
+        except Exception as exc:
+            if self.database.is_error(exc):
+                return "unavailable"
+            raise
+
+    @staticmethod
+    def _json(value):
+        return json.loads(value) if isinstance(value, str) else (value or [])
 
     @staticmethod
     def _document(row: sqlite3.Row) -> DocumentRead:
@@ -424,7 +458,7 @@ class DocumentRepository:
         }
         data.update(
             collection=row["collection_name"],
-            tags=json.loads(row["tags_json"] or "[]"),
+            tags=DocumentRepository._json(row["tags_json"]),
             favorite=bool(row["favorite"]),
             source_available=bool(row["source_path"]),
         )
@@ -433,7 +467,7 @@ class DocumentRepository:
     @staticmethod
     def _search_hit(row: dict) -> SearchHit:
         row["collection"] = row.get("collection_name")
-        row["tags"] = json.loads(row.get("tags_json") or "[]")
+        row["tags"] = DocumentRepository._json(row.get("tags_json"))
         row["favorite"] = bool(row.get("favorite"))
         row["source_available"] = bool(row.get("source_path"))
         return SearchHit(**row)
@@ -549,17 +583,19 @@ class DocumentRepository:
                 (workspace_id, limit),
             ).fetchall()
             total = connection.execute(
-                "SELECT COUNT(*) FROM ingestion_jobs WHERE workspace_id = ?", (workspace_id,)
-            ).fetchone()[0]
+                "SELECT COUNT(*) AS count FROM ingestion_jobs WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()["count"]
         return IngestionJobList(items=[self._ingestion_job(row) for row in rows], total=total)
 
     def claim_next_ingestion_job(self) -> IngestionJob | None:
         now = datetime.now(UTC).isoformat()
         with closing(self.connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            lock_clause = " FOR UPDATE SKIP LOCKED" if self.backend == "postgresql" else ""
             row = connection.execute(
                 """SELECT id FROM ingestion_jobs
-                WHERE status = 'queued' ORDER BY created_at LIMIT 1"""
+                WHERE status = 'queued' ORDER BY created_at LIMIT 1""" + lock_clause
             ).fetchone()
             if row is None:
                 connection.commit()
@@ -582,6 +618,8 @@ class DocumentRepository:
         updates = {key: value for key, value in changes.items() if key in allowed}
         if not updates:
             return self.get_ingestion_job(job_id)
+        if self.backend == "postgresql" and "cancel_requested" in updates:
+            updates["cancel_requested"] = bool(updates["cancel_requested"])
         updates["updated_at"] = datetime.now(UTC).isoformat()
         assignments = ", ".join(f"{key} = ?" for key in updates)
         with closing(self.connect()) as connection:
@@ -746,8 +784,9 @@ class DocumentRepository:
     def _saved_view(row: sqlite3.Row) -> SavedViewRead:
         return SavedViewRead(
             id=row["id"], name=row["name"], query=row["query"],
-            collection=row["collection_name"], tags=json.loads(row["tags_json"]),
-            source_types=json.loads(row["source_types_json"]), favorite=bool(row["favorite"]),
+            collection=row["collection_name"], tags=DocumentRepository._json(row["tags_json"]),
+            source_types=DocumentRepository._json(row["source_types_json"]),
+            favorite=bool(row["favorite"]),
             date_range=row["date_range"], sort=row["sort_mode"],
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
@@ -809,7 +848,10 @@ class DocumentRepository:
         return ConversationMessageRead(
             id=row["id"], conversation_id=row["conversation_id"], role=row["role"],
             content=row["content"],
-            citations=[Citation(**item) for item in json.loads(row["citations_json"] or "[]")],
+            citations=[
+                Citation(**item)
+                for item in DocumentRepository._json(row["citations_json"])
+            ],
             generated=bool(row["generated"]), grounded=bool(row["grounded"]),
             scope_description=row["scope_description"], warning=row["warning"],
             created_at=row["created_at"],
@@ -926,8 +968,9 @@ class DocumentRepository:
                 (workspace_id, limit, offset),
             ).fetchall()
             total = connection.execute(
-                "SELECT COUNT(*) FROM documents WHERE workspace_id = ?", (workspace_id,)
-            ).fetchone()[0]
+                "SELECT COUNT(*) AS count FROM documents WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()["count"]
         return DocumentList(items=[self._document(row) for row in rows], total=total)
 
     def delete(self, document_id: str, workspace_id: str = "local") -> bool:
@@ -1091,14 +1134,14 @@ class DocumentRepository:
     def embedding_status(self, model: str, runtime_loaded: bool, workspace_id: str = "local") -> EmbeddingStatus:
         with closing(self.connect()) as connection:
             total = connection.execute(
-                """SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id
+                """SELECT COUNT(*) AS count FROM chunks c JOIN documents d ON d.id = c.document_id
                 WHERE d.workspace_id = ?""", (workspace_id,)
-            ).fetchone()[0]
+            ).fetchone()["count"]
             indexed = connection.execute(
-                """SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id
+                """SELECT COUNT(*) AS count FROM chunks c JOIN documents d ON d.id = c.document_id
                 WHERE d.workspace_id = ? AND c.embedding IS NOT NULL AND c.embedding_model = ?""",
                 (workspace_id, model),
-            ).fetchone()[0]
+            ).fetchone()["count"]
         return EmbeddingStatus(
             model=model,
             total_chunks=total,
@@ -1124,11 +1167,28 @@ class DocumentRepository:
         model: str,
     ) -> None:
         with closing(self.connect()) as connection:
-            connection.executemany(
-                "UPDATE chunks SET embedding = ?, embedding_model = ? WHERE id = ?",
-                [(vector.astype(np.float32).tobytes(), model, chunk_id) for chunk_id, vector in embeddings],
-            )
+            if self.backend == "postgresql":
+                connection.executemany(
+                    "UPDATE chunks SET embedding = ?::vector, embedding_model = ? WHERE id = ?",
+                    [
+                        (self._vector_text(vector), model, chunk_id)
+                        for chunk_id, vector in embeddings
+                    ],
+                )
+            else:
+                connection.executemany(
+                    "UPDATE chunks SET embedding = ?, embedding_model = ? WHERE id = ?",
+                    [
+                        (vector.astype(np.float32).tobytes(), model, chunk_id)
+                        for chunk_id, vector in embeddings
+                    ],
+                )
             connection.commit()
+
+    @staticmethod
+    def _vector_text(vector: np.ndarray) -> str:
+        values = vector.astype(np.float32).tolist()
+        return "[" + ",".join(f"{value:.8g}" for value in values) + "]"
 
     @staticmethod
     def _scope_sql(
@@ -1161,22 +1221,43 @@ class DocumentRepository:
     ) -> list[dict]:
         scope_sql, scope_params = self._scope_sql(workspace_id, document_ids, collection, source_types)
         with closing(self.connect()) as connection:
-            rows = connection.execute(
-                f"""
-                SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
-                    c.start_seconds, c.end_seconds,
-                    c.content AS passage,
-                    -bm25(chunks_fts, 7.0, 1.0) AS score,
-                    snippet(chunks_fts, 1, '<mark>', '</mark>', ' ... ', 34) AS snippet
-                FROM chunks_fts
-                JOIN chunks c ON c.id = chunks_fts.rowid
-                JOIN documents d ON d.id = c.document_id
-                WHERE chunks_fts MATCH ?{scope_sql}
-                ORDER BY score DESC
-                LIMIT ?
-                """,
-                (fts_query, *scope_params, limit),
-            ).fetchall()
+            if self.backend == "postgresql":
+                rows = connection.execute(
+                    f"""
+                    WITH search AS (SELECT websearch_to_tsquery('simple', ?) AS query)
+                    SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
+                        c.start_seconds, c.end_seconds, c.content AS passage,
+                        ts_rank_cd(c.search_vector, search.query) AS score,
+                        ts_headline(
+                            'simple', c.content, search.query,
+                            'StartSel=<mark>, StopSel=</mark>, MaxWords=34, MinWords=12'
+                        ) AS snippet
+                    FROM chunks c
+                    JOIN documents d ON d.id = c.document_id
+                    CROSS JOIN search
+                    WHERE c.search_vector @@ search.query{scope_sql}
+                    ORDER BY score DESC
+                    LIMIT ?
+                    """,
+                    (fts_query, *scope_params, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    f"""
+                    SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
+                        c.start_seconds, c.end_seconds,
+                        c.content AS passage,
+                        -bm25(chunks_fts, 7.0, 1.0) AS score,
+                        snippet(chunks_fts, 1, '<mark>', '</mark>', ' ... ', 34) AS snippet
+                    FROM chunks_fts
+                    JOIN chunks c ON c.id = chunks_fts.rowid
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE chunks_fts MATCH ?{scope_sql}
+                    ORDER BY score DESC
+                    LIMIT ?
+                    """,
+                    (fts_query, *scope_params, limit),
+                ).fetchall()
         return [dict(row) for row in rows]
 
     def _semantic_candidates(
@@ -1191,6 +1272,25 @@ class DocumentRepository:
     ) -> list[dict]:
         scope_sql, scope_params = self._scope_sql(workspace_id, document_ids, collection, source_types)
         with closing(self.connect()) as connection:
+            if self.backend == "postgresql":
+                vector = self._vector_text(query_vector)
+                rows = connection.execute(
+                    f"""SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
+                        c.start_seconds, c.end_seconds, c.content AS passage,
+                        1 - (c.embedding <=> ?::vector) AS score,
+                        LEFT(c.content, 320) AS snippet
+                    FROM chunks c
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE c.embedding IS NOT NULL AND c.embedding_model = ?{scope_sql}
+                        AND 1 - (c.embedding <=> ?::vector) >= ?
+                    ORDER BY c.embedding <=> ?::vector
+                    LIMIT ?""",
+                    (
+                        vector, model, *scope_params, vector,
+                        SEMANTIC_MIN_SCORE, vector, limit,
+                    ),
+                ).fetchall()
+                return [dict(row) for row in rows]
             rows = connection.execute(
                 f"""SELECT d.*, c.id AS passage_id, c.chunk_index, c.page_number,
                     c.start_seconds, c.end_seconds,

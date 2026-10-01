@@ -2,7 +2,7 @@
 
 Local-first document search and text-to-speech, sized for a 16 GB Apple Silicon Mac.
 
-Phase 17 provides a production-hardened local multimodal knowledge base with source-aware reading and organization: import PDFs, scanned
+Phase 18 provides a production-ready multimodal knowledge base with source-aware reading and organization: import PDFs, scanned
 documents, images, audio, video, text, and Markdown; search page-aware or timestamped passages by
 exact wording or semantic meaning; inspect ranked snippets with source citations; and read any
 document or transcript aloud with local speech synthesis. Long-running OCR and transcription jobs
@@ -24,27 +24,27 @@ created after upgrading becomes the owner of the existing local workspace and re
 Explicit origin and host allowlists, CSRF checks, secure response headers, login throttling, request IDs,
 structured request logs, health probes, Prometheus metrics, verified backups, and continuous integration
 provide a safer operational baseline. A Caddy deployment terminates TLS and serves the frontend and API
-from one origin. A PostgreSQL/pgvector schema and one-way migration utility are included for staged data
-migration; the application runtime continues to use SQLite in this phase.
+from one origin. SQLite with FTS5 remains the lightweight local default, while production runs on
+PostgreSQL full-text search and pgvector cosine retrieval through the same repository interface.
 
 ## Stack
 
 - React 18 and Vite
 - FastAPI and Pydantic
-- SQLite with FTS5 full-text ranking
+- SQLite with FTS5 for local development
+- PostgreSQL 16 with full-text ranking and pgvector for production
 - pypdf for local PDF text extraction
 - FastEmbed with quantized BGE-small embeddings for semantic retrieval
 - RapidOCR and PyMuPDF for local image and scanned-PDF text recognition
 - faster-whisper with CTranslate2 for local timestamped transcription
 - macOS `say` for local speech audio when available
 - Browser Web Speech API for text-to-speech
-- SQLite-backed background ingestion worker
+- Database-backed background ingestion worker with transactional job claiming
 - Caddy, Nginx, and Docker Compose as optional deployment paths
 - GitHub Actions for backend, frontend, and container verification
 
-The production target is recorded in `.cursor/rules/production-architecture.mdc`. Local adapters
-are intentionally replaceable by PostgreSQL/pgvector, S3, Redis, and neural speech services when
-production requirements demand it.
+The production target is recorded in `.cursor/rules/production-architecture.mdc`. Source files still
+use local or container-volume storage; an S3-compatible storage adapter is the next infrastructure step.
 
 ## Run locally
 
@@ -99,7 +99,8 @@ docker compose up --build
 ```
 
 The default profile starts only the API and frontend. The reserved PostgreSQL/pgvector service can
-be inspected with `docker compose --profile production-data up`, but the application does not depend on it.
+be tested locally with `docker compose --profile production-data up`; set `NEXUSAI_DATABASE_URL` to
+the `postgres` service URL to make the API use it. Without that setting, local Docker keeps SQLite.
 
 ## Production deployment
 
@@ -112,9 +113,12 @@ docker compose --env-file .env.production -f compose.production.yml up -d --buil
 ```
 
 Caddy obtains and renews TLS certificates. The API runs as a non-root user with a read-only root
-filesystem; persistent state is stored in the `nexusai-data` volume. Set an explicit domain,
+filesystem. PostgreSQL data is stored in `postgres-data`, while uploaded sources and model caches
+remain in `nexusai-data`. Set an explicit domain,
 metrics token, and strong database password. Do not use wildcard CORS origins. If TLS terminates at
 a different proxy, preserve the original `Host` header and keep `NEXUSAI_SECURE_COOKIES=1`.
+The credentials in `NEXUSAI_DATABASE_URL` must match the PostgreSQL settings; URL-encode reserved
+characters in its password.
 
 Operational endpoints are `GET /health/live`, `GET /health/ready`, and `GET /metrics`. Production
 metrics require `Authorization: Bearer <NEXUSAI_METRICS_TOKEN>`. API logs are newline-delimited JSON
@@ -122,7 +126,7 @@ and every response includes an `X-Request-ID`.
 
 ## Backup and recovery
 
-The backup command uses SQLite's online backup API and includes uploaded source files plus a
+For local SQLite, the backup command uses SQLite's online backup API and includes uploaded files plus a
 SHA-256 manifest. Verify every archive before moving or restoring it:
 
 ```bash
@@ -134,11 +138,20 @@ cd backend
 .venv/bin/python -m app.maintenance restore ../backups/nexusai.tar.gz --force
 ```
 
-For containers, run the same module in the `api` service and write the archive under `/app/data` so
-it is stored in the persistent volume. Copy verified archives to separate encrypted storage and
-periodically test restoration.
+For production, back up PostgreSQL with `pg_dump` and snapshot or separately archive the
+`nexusai-data` volume. Keep both artifacts together because database rows reference uploaded files:
 
-## PostgreSQL migration staging
+```bash
+docker compose --env-file .env.production -f compose.production.yml exec postgres \
+  pg_dump -U nexusai -d nexusai -Fc -f /tmp/nexusai.dump
+docker compose --env-file .env.production -f compose.production.yml \
+  cp postgres:/tmp/nexusai.dump ./backups/nexusai.dump
+```
+
+Use the configured database user and name if they differ. Copy backups to separate encrypted storage
+and periodically restore them into a disposable environment.
+
+## PostgreSQL migration and cutover
 
 Install the production requirements, create and verify a backup, initialize the pgvector schema,
 then run the one-way copy utility:
@@ -150,15 +163,38 @@ cd backend
   --sqlite data/nexusai.db \
   --database-url 'postgresql://nexusai:password@localhost:5432/nexusai' \
   --force
+
+# Read-only validation can be repeated after migration.
+.venv/bin/python -m app.migrate_postgres \
+  --sqlite data/nexusai.db \
+  --database-url 'postgresql://nexusai:password@localhost:5432/nexusai' \
+  --validate-only
 ```
 
-`--force` confirms that the target tables may be truncated. Compare the printed per-table counts
-with the source and test the target before changing any infrastructure. This prepares PostgreSQL
-data but does not switch the API away from SQLite.
+`--force` confirms that the target tables may be truncated. The migration checks every table count
+inside the transaction and resets the chunk identity sequence. `--validate-only` compares the source
+and target without changing either database.
+
+For an existing Phase 17 production volume, stop the API, create and verify its SQLite backup, start
+only the new PostgreSQL service, and run the migration utility from a one-off API container against
+`/app/data/nexusai.db`:
+
+```bash
+docker compose --env-file .env.production -f compose.production.yml stop api
+docker compose --env-file .env.production -f compose.production.yml up -d postgres
+docker compose --env-file .env.production -f compose.production.yml run --rm api \
+  python -m app.migrate_postgres --sqlite /app/data/nexusai.db --force
+```
+
+Start the full stack only after validation. Keep the SQLite backup unchanged
+through the rollback window. To roll back, stop the API, remove `NEXUSAI_DATABASE_URL` from its
+environment, restore the verified SQLite archive, and restart the API. Writes made after PostgreSQL
+cutover are not copied back automatically.
 
 ## Deployment settings
 
 - `NEXUSAI_ENV`: use `production` outside local development.
+- `NEXUSAI_DATABASE_URL`: PostgreSQL connection URL; omit it to use local SQLite.
 - `NEXUSAI_CORS_ORIGINS`: comma-separated, explicit browser origins.
 - `NEXUSAI_ALLOWED_HOSTS`: comma-separated HTTP host allowlist.
 - `NEXUSAI_FORCE_HTTPS`: redirect direct HTTP requests when TLS terminates in the API.
@@ -187,7 +223,7 @@ Ollama adapter when available. Speech playback uses macOS `say` through the API 
 falls back to the browser Web Speech API.
 
 PDF, image, audio, and video uploads are copied to `backend/data/uploads` and processed by a single
-local worker. Job state is stored in SQLite, so queued or interrupted imports resume when the API
+local worker. Job state is stored in the selected database, so queued or interrupted imports resume when the API
 restarts. The import activity panel reports each job's stage and supports cancellation and retry.
 Completed source files belong to their documents, so import history can be cleared independently.
 Deleting a document also removes its stored original file.

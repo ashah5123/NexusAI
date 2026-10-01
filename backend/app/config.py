@@ -16,6 +16,7 @@ def _bool(name: str, default: bool = False) -> bool:
 @dataclass(frozen=True)
 class Settings:
     environment: str
+    database_url: str | None
     cors_origins: tuple[str, ...]
     allowed_hosts: tuple[str, ...]
     force_https: bool
@@ -40,6 +41,7 @@ class Settings:
             raise ValueError("NEXUSAI_ALLOWED_HOSTS must contain at least one host")
         return cls(
             environment=environment,
+            database_url=os.getenv("NEXUSAI_DATABASE_URL") or None,
             cors_origins=cors_origins,
             allowed_hosts=allowed_hosts,
             force_https=force_https,

@@ -28,7 +28,7 @@ services:
       - /tmp
     environment:
       NEXUSAI_ENV: production
-      NEXUSAI_DB_PATH: /app/data/nexusai.db
+      NEXUSAI_DATABASE_URL: ${NEXUSAI_DATABASE_URL:?Set NEXUSAI_DATABASE_URL}
       NEXUSAI_UPLOAD_DIR: /app/data/uploads
       NEXUSAI_MODEL_CACHE: /app/data/models
       NEXUSAI_WHISPER_CACHE: /app/data/models/whisper
@@ -43,6 +43,9 @@ services:
       - nexusai-data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   frontend:
     build:
@@ -57,7 +60,6 @@ services:
 
   postgres:
     image: pgvector/pgvector:pg16
-    profiles: ["migration"]
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nexusai}
@@ -66,6 +68,11 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexusai} -d ${POSTGRES_DB:-nexusai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   nexusai-data:

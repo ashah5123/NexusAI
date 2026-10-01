@@ -77,8 +77,8 @@ from .observability import log_request, metrics
 from .speech import LocalSpeechService, SpeechError
 from .transcription import MAX_MEDIA_BYTES, TranscriptionService
 
-repository = DocumentRepository()
-auth_service = AuthService(repository.path)
+repository = DocumentRepository(database_url=settings.database_url)
+auth_service = AuthService(repository.database)
 embedding_service = EmbeddingService()
 ocr_service = OCRService()
 transcription_service = TranscriptionService()
@@ -91,7 +91,7 @@ ingestion_worker = IngestionWorker(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    auth_service.path = repository.path
+    auth_service.database = repository.database
     repository.initialize()
     ingestion_worker.start()
     try:
@@ -100,7 +100,7 @@ async def lifespan(_: FastAPI):
         ingestion_worker.stop()
 
 
-app = FastAPI(title="NexusAI API", version="0.18.0", lifespan=lifespan)
+app = FastAPI(title="NexusAI API", version="0.19.0", lifespan=lifespan)
 
 if settings.force_https:
     app.add_middleware(HTTPSRedirectMiddleware)
@@ -216,7 +216,10 @@ def api_root() -> RedirectResponse:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return HealthResponse(status="ok", service="nexusai-api", database=repository.health())
+    return HealthResponse(
+        status="ok", service="nexusai-api", database=repository.health(),
+        database_backend=repository.backend,
+    )
 
 
 @app.get("/health/live")
@@ -229,9 +232,18 @@ def readiness() -> Response:
     database = repository.health()
     if database != "connected":
         return JSONResponse(
-            status_code=503, content={"status": "unavailable", "database": database}
+            status_code=503,
+            content={
+                "status": "unavailable", "database": database,
+                "database_backend": repository.backend,
+            },
         )
-    return JSONResponse(content={"status": "ready", "database": database})
+    return JSONResponse(
+        content={
+            "status": "ready", "database": database,
+            "database_backend": repository.backend,
+        }
+    )
 
 
 @app.get("/metrics")

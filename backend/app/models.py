@@ -8,6 +8,7 @@ class HealthResponse(BaseModel):
     status: str
     service: str
     database: str
+    database_backend: Literal["sqlite", "postgresql"]
 
 
 class RegisterRequest(BaseModel):
