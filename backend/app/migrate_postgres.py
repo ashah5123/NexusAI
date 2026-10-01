@@ -108,10 +108,14 @@ def migrate(sqlite_path: Path, database_url: str, schema_path: Path, force: bool
                     for column in columns
                 )
                 statement = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
-                target.executemany(
-                    statement,
-                    [tuple(convert(column, row[column]) for column in columns) for row in rows],
-                )
+                with target.cursor() as cursor:
+                    cursor.executemany(
+                        statement,
+                        [
+                            tuple(convert(column, row[column]) for column in columns)
+                            for row in rows
+                        ],
+                    )
             counts[table] = len(rows)
             target_count = target.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             if target_count != len(rows):

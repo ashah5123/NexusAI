@@ -99,7 +99,7 @@ class PostgresRepositoryTest(unittest.TestCase):
 
     def test_jobs_saved_views_and_conversations(self) -> None:
         self.repository.create_ingestion_job(
-            "postgres-job", "Source", "text", "source.txt", Path("/tmp/source.txt")
+            "postgres-job", "Source", "image", "source.png", Path("/tmp/source.png")
         )
         claimed = self.repository.claim_next_ingestion_job()
         view = self.repository.create_saved_view(SavedViewCreate(
